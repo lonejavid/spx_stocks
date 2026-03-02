@@ -138,8 +138,20 @@ VIX_SELL_MIN = 22
 #   Expected: SELL (3/4 core conditions + 3/3 confirmations)
 # -----------------------------------------------------------------------------
 
-# Load from environment so the secret is never committed (use .env or export SLACK_WEBHOOK_URL)
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+# Slack webhook: on Streamlit Cloud use Secrets (st.secrets); locally use .env (os.environ)
+def _get_slack_webhook_url():
+    url = ""
+    try:
+        if hasattr(st, "secrets") and st.secrets:
+            url = st.secrets.get("SLACK_WEBHOOK_URL", "") or getattr(st.secrets, "SLACK_WEBHOOK_URL", "")
+    except Exception:
+        pass
+    if not (url and str(url).strip()):
+        url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+    return str(url).strip() if url else ""
+
+
+SLACK_WEBHOOK_URL = _get_slack_webhook_url()
 SLACK_COOLDOWN_MINUTES = 30
 
 
