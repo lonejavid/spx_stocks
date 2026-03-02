@@ -4,6 +4,14 @@ Auto-refresh every 5 minutes. Best windows: 10:00–11:30 AM & 2:30–3:30 PM ES
 """
 import json
 import os
+
+# Load .env so SLACK_WEBHOOK_URL and POLYGON_API_KEY are available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -96,23 +104,39 @@ EST = pytz.timezone("America/New_York")
 
 # 8 conditions for signal strength score (labels for display)
 CONDITION_LABELS = [
-    "Price above VWAP",
-    "RSI below 40 (buy) or above 60 (sell)",
-    "EMA 9 crossed EMA 21",
-    "MACD crossed signal line",
-    "VIX below 20",
-    "AAPL green today",
-    "MSFT green today",
-    "QQQ above VWAP",
+    "Price above/below VWAP",
+    "RSI in BUY zone (<45) or SELL zone (>55)",
+    "EMA 9 crossed EMA 21 (current bar)",
+    "MACD above/below signal line",
+    "VIX < 25 (BUY) / >= 22 (SELL)",
+    "AAPL green/red today",
+    "MSFT green/red today",
+    "QQQ above/below VWAP",
 ]
 
 # Trading windows EST (green zones)
 WINDOW1 = (10, 0), (11, 30)   # 10:00 - 11:30
 WINDOW2 = (14, 30), (15, 30)  # 2:30 PM - 3:30 PM
 
-BUY_RSI_MAX = 40
-SELL_RSI_MIN = 60
-VIX_CALM = 20
+# Relaxed thresholds for professional intraday (was 40/60/20)
+BUY_RSI_MAX = 45
+SELL_RSI_MIN = 55
+VIX_BUY_MAX = 25
+VIX_SELL_MIN = 22
+
+# -----------------------------------------------------------------------------
+# VERIFICATION MOCK TESTS (commented — uncomment to verify signal logic)
+# -----------------------------------------------------------------------------
+# Mock test — this should produce a BUY signal:
+#   RSI = 43, MACD_line = 2.1, MACD_signal = 1.8, EMA9 = 6850, EMA21 = 6845
+#   VIX = 23, AAPL_green = True, QQQ_above_vwap = False, MSFT_green = True
+#   Expected: BUY (3/4 core conditions + 2/3 confirmations)
+#
+# Mock test — this should produce a SELL signal:
+#   RSI = 58, MACD_line = -1.2, MACD_signal = 0.3, EMA9 = 6830, EMA21 = 6840
+#   VIX = 24, AAPL_green = False, QQQ_above_vwap = False, MSFT_green = False
+#   Expected: SELL (3/4 core conditions + 3/3 confirmations)
+# -----------------------------------------------------------------------------
 
 # Load from environment so the secret is never committed (use .env or export SLACK_WEBHOOK_URL)
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
@@ -147,6 +171,15 @@ def _should_send_signal_alert(signal_type: str) -> bool:
 def _record_signal_sent(signal_type: str) -> None:
     st.session_state["slack_last_signal_time"] = datetime.now(EST)
     st.session_state["slack_last_signal_type"] = signal_type
+
+
+def _signal_base_type(signal: str) -> str:
+    """Return 'BUY' or 'SELL' for cooldown/key; STRONG BUY/SELL share cooldown with BUY/SELL."""
+    if signal in ("BUY", "STRONG BUY"):
+        return "BUY"
+    if signal in ("SELL", "STRONG SELL"):
+        return "SELL"
+    return signal
 
 
 def _should_send_daily_summary() -> bool:
@@ -382,7 +415,24 @@ def macd_cross_below(df: pd.DataFrame, idx: int) -> bool:
     return df[mc].iloc[idx] < df[sc].iloc[idx] and df[mc].iloc[idx - 1] >= df[sc].iloc[idx - 1]
 
 
-def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float):
+def _get_confirmation_bools(data: dict) -> tuple:
+    """Return (aapl_green, msft_green, qqq_above_vwap). Used for BUY/SELL confirmations."""
+    aapl_green = msft_green = qqq_above_vwap = False
+    aapl = data.get("AAPL") if data else None
+    if aapl is not None and not aapl.empty and "Open" in aapl.columns and "Close" in aapl.columns:
+        aapl_green = aapl["Close"].iloc[-1] > aapl["Open"].iloc[0]
+    msft = data.get("MSFT") if data else None
+    if msft is not None and not msft.empty and "Open" in msft.columns and "Close" in msft.columns:
+        msft_green = msft["Close"].iloc[-1] > msft["Open"].iloc[0]
+    qqq = data.get("QQQ") if data else None
+    if qqq is not None and not qqq.empty and "Close" in qqq.columns:
+        qqq_vwap = _qwap(qqq)
+        if not qqq_vwap.empty:
+            qqq_above_vwap = qqq["Close"].iloc[-1] > qqq_vwap.iloc[-1]
+    return aapl_green, msft_green, qqq_above_vwap
+
+
+def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
     """For displayed day: close, pct_change, n_buy, n_sell, first_buy_time, first_sell_time."""
     if df_spx.empty or len(df_spx) < 2:
         return None
@@ -392,13 +442,13 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float):
     n_buy = n_sell = 0
     first_buy_time = first_sell_time = None
     for i in range(1, len(df_spx)):
-        s = get_signal(df_spx.iloc[: i + 1], vix_value)
-        if s == "BUY":
+        s = get_signal(df_spx.iloc[: i + 1], vix_value, data or {})
+        if s in ("BUY", "STRONG BUY"):
             n_buy += 1
             if first_buy_time is None:
                 ts = df_spx.index[i]
                 first_buy_time = pd.Timestamp(ts).strftime("%I:%M %p") if hasattr(pd.Timestamp(ts), "strftime") else str(ts)
-        elif s == "SELL":
+        elif s in ("SELL", "STRONG SELL"):
             n_sell += 1
             if first_sell_time is None:
                 ts = df_spx.index[i]
@@ -412,27 +462,54 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float):
     return {"close": close_final, "pct": pct, "n_buy": n_buy, "n_sell": n_sell, "best": best_str}
 
 
-def get_signal(df_spx: pd.DataFrame, vix_value: float) -> str:
-    """BUY / SELL / WAIT from latest bar."""
+def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None) -> str:
+    """
+    BUY: 3 of 4 core (RSI<45, MACD>Signal, VIX<25, EMA9>EMA21) + at least 1 confirmation (AAPL green, MSFT green, QQQ above VWAP).
+    SELL: 3 of 4 core (RSI>55, MACD<Signal, VIX>=22, EMA9<EMA21) + at least 1 confirmation (AAPL red, MSFT red, QQQ below VWAP).
+    STRONG BUY/SELL: all 4 core + all 3 confirmations.
+    """
     if df_spx.empty or len(df_spx) < 2:
         return "WAIT"
+    data = data or {}
     i = len(df_spx) - 1
     row = df_spx.iloc[i]
     rsi = row.get("RSI")
     close = row["Close"]
     vwap = row.get("VWAP")
-    if pd.isna(rsi) or pd.isna(vwap) or vix_value is None:
+    ema9 = row.get("EMA9")
+    ema21 = row.get("EMA21")
+    if pd.isna(rsi) or vix_value is None:
         return "WAIT"
-    # VIX < 20 for BUY; VIX >= 20 for SELL (20.0 or above = ❌ for BUY)
-    vix_ok_buy = vix_value < VIX_CALM
-    vix_ok_sell = vix_value >= VIX_CALM
-    above_vwap = close > vwap
-    below_vwap = close < vwap
-    cross_up = macd_cross_above(df_spx, i)
-    cross_dn = macd_cross_below(df_spx, i)
-    if rsi < BUY_RSI_MAX and above_vwap and cross_up and vix_ok_buy:
+    mc, sc = _macd_signal_cols(df_spx)
+    macd_above = (mc and sc and df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
+    macd_below = (mc and sc and df_spx[mc].iloc[i] < df_spx[sc].iloc[i])
+    # Core conditions (no VWAP in core to avoid contradiction with oversold)
+    core_buy = [
+        rsi < BUY_RSI_MAX,
+        macd_above,
+        vix_value < VIX_BUY_MAX,
+        (ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 > ema21),
+    ]
+    core_sell = [
+        rsi > SELL_RSI_MIN,
+        macd_below,
+        vix_value >= VIX_SELL_MIN,
+        (ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 < ema21),
+    ]
+    aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
+    confirm_buy = [aapl_green, msft_green, qqq_above_vwap]
+    confirm_sell = [not aapl_green, not msft_green, not qqq_above_vwap]
+    n_core_buy = sum(core_buy)
+    n_core_sell = sum(core_sell)
+    n_confirm_buy = sum(confirm_buy)
+    n_confirm_sell = sum(confirm_sell)
+    if n_core_buy >= 3 and n_confirm_buy >= 1:
+        if n_core_buy == 4 and n_confirm_buy == 3:
+            return "STRONG BUY"
         return "BUY"
-    if rsi > SELL_RSI_MIN and below_vwap and cross_dn and vix_ok_sell:
+    if n_core_sell >= 3 and n_confirm_sell >= 1:
+        if n_core_sell == 4 and n_confirm_sell == 3:
+            return "STRONG SELL"
         return "SELL"
     return "WAIT"
 
@@ -448,7 +525,7 @@ def _qwap(df: pd.DataFrame) -> pd.Series:
 def get_signal_strength_conditions(df_spx: pd.DataFrame, vix_value: float, data: dict) -> tuple:
     """
     Return (score 0-8, list of 8 bools for BUY, list of 8 bools for SELL).
-    Order: Price vs VWAP, RSI, EMA cross, MACD cross, VIX, AAPL green, MSFT green, QQQ above VWAP.
+    Order: Price vs VWAP, RSI zone 45/55, EMA cross (current bar), MACD above/below signal, VIX 25/22, AAPL, MSFT, QQQ.
     """
     buy_bools = [False] * 8
     sell_bools = [False] * 8
@@ -463,40 +540,30 @@ def get_signal_strength_conditions(df_spx: pd.DataFrame, vix_value: float, data:
     if vwap is not None and not pd.isna(vwap):
         buy_bools[0] = close > vwap
         sell_bools[0] = close < vwap
-    # 2. RSI below 40 / above 60
+    # 2. RSI in BUY zone (<45) or SELL zone (>55)
     if rsi_val is not None and not pd.isna(rsi_val):
-        buy_bools[1] = rsi_val < 40
-        sell_bools[1] = rsi_val > 60
-    # 3. EMA 9 crossed EMA 21
+        buy_bools[1] = rsi_val < BUY_RSI_MAX
+        sell_bools[1] = rsi_val > SELL_RSI_MIN
+    # 3. EMA 9 crossed EMA 21 on current bar (for score only)
     buy_bools[2] = _ema_cross_above(df_spx, i)
     sell_bools[2] = _ema_cross_below(df_spx, i)
-    # 4. MACD crossed signal
-    buy_bools[3] = macd_cross_above(df_spx, i)
-    sell_bools[3] = macd_cross_below(df_spx, i)
-    # 5. VIX strictly below 20 for BUY; 20.0 or above for SELL (so 20.0 shows ❌ BUY, ✅ SELL)
+    # 4. MACD above/below signal (sustained, not just cross)
+    mc, sc = _macd_signal_cols(df_spx)
+    if mc and sc:
+        buy_bools[3] = df_spx[mc].iloc[i] > df_spx[sc].iloc[i]
+        sell_bools[3] = df_spx[mc].iloc[i] < df_spx[sc].iloc[i]
+    # 5. VIX < 25 (BUY) / >= 22 (SELL)
     if vix_value is not None:
-        buy_bools[4] = vix_value < 20
-        sell_bools[4] = vix_value >= 20
-    # 6. AAPL green today
-    aapl = data.get("AAPL")
-    if aapl is not None and not aapl.empty and "Open" in aapl.columns and "Close" in aapl.columns:
-        aapl_green = aapl["Close"].iloc[-1] > aapl["Open"].iloc[0]
-        buy_bools[5] = aapl_green
-        sell_bools[5] = not aapl_green
-    # 7. MSFT green today
-    msft = data.get("MSFT")
-    if msft is not None and not msft.empty and "Open" in msft.columns and "Close" in msft.columns:
-        msft_green = msft["Close"].iloc[-1] > msft["Open"].iloc[0]
-        buy_bools[6] = msft_green
-        sell_bools[6] = not msft_green
-    # 8. QQQ above VWAP
-    qqq = data.get("QQQ")
-    if qqq is not None and not qqq.empty and "Close" in qqq.columns:
-        qqq_vwap = _qwap(qqq)
-        if not qqq_vwap.empty:
-            qqq_above = qqq["Close"].iloc[-1] > qqq_vwap.iloc[-1]
-            buy_bools[7] = qqq_above
-            sell_bools[7] = not qqq_above
+        buy_bools[4] = vix_value < VIX_BUY_MAX
+        sell_bools[4] = vix_value >= VIX_SELL_MIN
+    # 6–8. AAPL, MSFT, QQQ
+    aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
+    buy_bools[5] = aapl_green
+    sell_bools[5] = not aapl_green
+    buy_bools[6] = msft_green
+    sell_bools[6] = not msft_green
+    buy_bools[7] = qqq_above_vwap
+    sell_bools[7] = not qqq_above_vwap
     buy_score = sum(buy_bools)
     sell_score = sum(sell_bools)
     return max(buy_score, sell_score), buy_bools, sell_bools
@@ -643,13 +710,15 @@ def run_dashboard():
     spx = data["spx"]
     vix_df = data["vix"]
     vix_value = data.get("vix_value")
-    if spx.empty or len(spx) < 5:
+    if spx.empty or len(spx) < 2:
         st.warning("Not enough SPX 5-minute data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
         return
     spx = add_indicators(spx)
-    signal = get_signal(spx, vix_value)
+    signal = get_signal(spx, vix_value, data)
     now_est = datetime.now(EST).strftime("%Y-%m-%d %H:%M ET")
     rsi_val = spx["RSI"].iloc[-1] if "RSI" in spx.columns else None
+    if len(spx) < 10:
+        st.info(f"⏳ Market just opened — {len(spx)} bars so far.")
 
     # Market status banner
     if is_market_open:
@@ -668,6 +737,19 @@ def run_dashboard():
         st.markdown(f"**Next open in:** {countdown}")
         st.markdown("")
 
+    # Best trading windows reminder (highlight current time if inside)
+    now_et = datetime.now(EST)
+    t = now_et.time()
+    in_w1 = dt_time(10, 0) <= t <= dt_time(11, 30)
+    in_w2 = dt_time(14, 30) <= t <= dt_time(15, 30)
+    in_window = in_w1 or in_w2
+    window_note = "10:00–11:30 AM ET and 2:30–3:30 PM ET"
+    if in_window:
+        st.markdown(f'<div style="background:rgba(0,212,170,0.2); border:1px solid #00d4aa; border-radius:8px; padding:8px 12px; margin-bottom:0.5rem;">'
+                    f'✅ <strong>Best trading windows:</strong> {window_note} — <span style="color:#00d4aa;">You are in a preferred window.</span></div>', unsafe_allow_html=True)
+    else:
+        st.caption(f"Best trading windows: {window_note}")
+
     # Always: Top row — SPX, VIX, RSI, Signal, Time (ET)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
@@ -679,22 +761,54 @@ def run_dashboard():
         rsi_str = f"{rsi_val:.1f}" if rsi_val is not None else "—"
         st.metric("RSI", rsi_str)
     with c4:
-        color = "#2ecc71" if signal == "BUY" else "#e74c3c" if signal == "SELL" else "#8892a0"
-        st.markdown(f"**Signal**<br><span class=\"signal-value\" style='color:{color};'>{signal}</span>", unsafe_allow_html=True)
+        # Signal box colors: STRONG BUY bright green, BUY green, SELL red, STRONG SELL dark red, WAIT gray
+        if signal == "STRONG BUY":
+            bg, border = "rgba(0,255,127,0.35)", "#00ff7f"
+        elif signal == "BUY":
+            bg, border = "rgba(46,204,113,0.35)", "#2ecc71"
+        elif signal == "STRONG SELL":
+            bg, border = "rgba(139,0,0,0.4)", "#8b0000"
+        elif signal == "SELL":
+            bg, border = "rgba(231,76,60,0.35)", "#e74c3c"
+        else:
+            bg, border = "rgba(136,146,160,0.25)", "#8892a0"
+        st.markdown(
+            f'<div style="background:{bg}; border:1px solid {border}; border-radius:8px; padding:8px 12px; text-align:center;">'
+            f'<span style="font-size:0.75rem; color:#8892a0;">SIGNAL</span><br>'
+            f'<span class="signal-value" style="color:{border}; font-weight:700;">{signal}</span></div>',
+            unsafe_allow_html=True,
+        )
     with c5:
         st.metric("Time (ET)", now_est)
 
-    # Signal strength score (4/8) and condition breakdown
+    # Signal strength score X/8 with colored progress bar (0-3 red, 4-5 yellow, 6-8 green)
     score_val, buy_bools, sell_bools = get_signal_strength_conditions(spx, vix_value, data)
-    show_buy = signal == "BUY" or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
+    show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
     active_bools = buy_bools if show_buy else sell_bools
-    active_score = sum(buy_bools) if show_buy else sum(sell_bools)
+    active_score = sum(active_bools)
+    if active_score <= 3:
+        bar_color = "#e74c3c"
+    elif active_score <= 5:
+        bar_color = "#f1c40f"
+    else:
+        bar_color = "#2ecc71"
     st.markdown(f"**Signal strength:** {active_score}/8")
+    st.markdown(
+        f'<div style="background:rgba(80,85,95,0.5); border-radius:6px; height:10px; overflow:hidden;">'
+        f'<div style="background:{bar_color}; width:{active_score * 12.5}%; height:100%; border-radius:6px;"></div></div>',
+        unsafe_allow_html=True,
+    )
     for j, label in enumerate(CONDITION_LABELS):
         st.write("✅" if active_bools[j] else "❌", label)
 
-    # Slack: signal alert when score >= 5 (no duplicate within 30 min)
-    if active_score >= 5 and signal in ("BUY", "SELL") and _should_send_signal_alert(signal):
+    # Last signal fired at (for alerts)
+    last_fired = st.session_state.get("slack_last_signal_time")
+    if last_fired is not None:
+        st.caption(f"Last signal fired at: {last_fired.strftime('%H:%M ET')}")
+
+    # Slack: automatic alert for BUY/SELL/STRONG BUY/STRONG SELL (30 min cooldown per base type)
+    base_type = _signal_base_type(signal)
+    if signal in ("BUY", "SELL", "STRONG BUY", "STRONG SELL") and base_type and _should_send_signal_alert(base_type):
         try:
             spx_p = spx["Close"].iloc[-1]
             r_str = f"{rsi_val:.1f}" if rsi_val is not None else "—"
@@ -702,37 +816,28 @@ def run_dashboard():
             time_short = datetime.now(EST).strftime("%I:%M %p ET").lstrip("0")
             conditions_met = [CONDITION_LABELS[k] for k in range(8) if active_bools[k]]
             cond_str = ", ".join(conditions_met) if conditions_met else "—"
-            if signal == "BUY":
-                msg = (
-                    f"🟢 *BUY SIGNAL — SPX Day Trading*\n"
-                    f"💰 *SPX Price:* ${spx_p:,.2f}\n"
-                    f"📊 *Signal Score:* {active_score}/8\n"
-                    f"⏰ *Time:* {time_short}\n"
-                    f"📈 *RSI:* {r_str}\n"
-                    f"😰 *VIX:* {v_str}\n"
-                    f"✅ Conditions met: {cond_str}\n"
-                    f"⚠️ Not financial advice."
-                )
-            else:
-                msg = (
-                    f"🔴 *SELL SIGNAL — SPX Day Trading*\n"
-                    f"💰 *SPX Price:* ${spx_p:,.2f}\n"
-                    f"📊 *Signal Score:* {active_score}/8\n"
-                    f"⏰ *Time:* {time_short}\n"
-                    f"📉 *RSI:* {r_str}\n"
-                    f"😰 *VIX:* {v_str}\n"
-                    f"✅ Conditions met: {cond_str}\n"
-                    f"⚠️ Not financial advice."
-                )
+            mc, sc = _macd_signal_cols(spx)
+            macd_status = "MACD > Signal" if (mc and sc and spx[mc].iloc[-1] > spx[sc].iloc[-1]) else "MACD < Signal"
+            emoji = "🟢" if "BUY" in signal else "🔴"
+            msg = (
+                f"{emoji} *{signal} — SPX Day Trading*\n"
+                f"💰 *SPX Price:* ${spx_p:,.2f}\n"
+                f"📊 *Signal Score:* {active_score}/8\n"
+                f"⏰ *Time:* {time_short}\n"
+                f"📈 *RSI:* {r_str} | *VIX:* {v_str}\n"
+                f"📉 *MACD:* {macd_status}\n"
+                f"✅ Conditions met: {cond_str}\n"
+                f"⚠️ Not financial advice."
+            )
             send_slack_alert(msg)
-            _record_signal_sent(signal)
+            _record_signal_sent(base_type)
         except Exception:
             pass
 
     # Slack: daily summary at 4:05–4:20 PM ET (once per day)
-    if _should_send_daily_summary() and not spx.empty and len(spx) >= 5:
+    if _should_send_daily_summary() and not spx.empty and len(spx) >= 2:
         try:
-            stats = _daily_signal_stats(spx, vix_value)
+            stats = _daily_signal_stats(spx, vix_value, data)
             if stats is not None:
                 today_str = datetime.now(EST).strftime("%Y-%m-%d")
                 r_close = f"{rsi_val:.1f}" if rsi_val is not None else "—"
@@ -755,7 +860,7 @@ def run_dashboard():
 
     # When closed: summary card (SPX close, % change, BUY/SELL counts, best signal)
     if not is_market_open:
-        stats = _daily_signal_stats(spx, vix_value)
+        stats = _daily_signal_stats(spx, vix_value, data)
         if stats:
             st.subheader(f"Session summary — {show_date_str}")
             s1, s2, s3, s4, s5 = st.columns(5)
@@ -791,14 +896,14 @@ def run_dashboard():
         fig_price.add_shape(s)
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # RSI
+    # RSI (mini chart with BUY zone 45 / SELL zone 55)
     st.subheader("RSI (14)")
     rsi_col = "RSI" if "RSI" in spx.columns else None
     if rsi_col:
         fig_rsi = go.Figure()
         fig_rsi.add_trace(go.Scatter(x=spx.index, y=spx[rsi_col], name="RSI", line=dict(color="#00d4aa", width=2)))
-        fig_rsi.add_hline(y=BUY_RSI_MAX, line_dash="dash", line_color="#2ecc71", annotation_text="40 (buy zone)")
-        fig_rsi.add_hline(y=SELL_RSI_MIN, line_dash="dash", line_color="#e74c3c", annotation_text="60 (sell zone)")
+        fig_rsi.add_hline(y=BUY_RSI_MAX, line_dash="dash", line_color="#2ecc71", annotation_text="45 (buy zone)")
+        fig_rsi.add_hline(y=SELL_RSI_MIN, line_dash="dash", line_color="#e74c3c", annotation_text="55 (sell zone)")
         fig_rsi.update_layout(**PLOTLY_LAYOUT, title="RSI (14)", height=280, xaxis=AXIS, yaxis=dict(**AXIS, range=[0, 100]))
         st.plotly_chart(fig_rsi, use_container_width=True)
 
@@ -855,17 +960,23 @@ def run_dashboard():
         rows.append({"Ticker": t, "Price": f"${close_now:,.2f}", "% Change": f"{pct:+.2f}%"})
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    # Signals log (session state)
-    if "signals_log" not in st.session_state:
-        st.session_state.signals_log = []
-    if signal in ("BUY", "SELL"):
-        st.session_state.signals_log.append({"Time (ET)": now_est, "Signal": signal, "SPX": f"${spx['Close'].iloc[-1]:,.2f}", "VIX": f"{vix_value:.1f}" if vix_value else "—"})
-        st.session_state.signals_log = st.session_state.signals_log[-50:]
-    st.subheader("Trading signals log")
-    if st.session_state.signals_log:
-        st.dataframe(pd.DataFrame(st.session_state.signals_log).iloc[::-1], use_container_width=True, hide_index=True)
+    # Signal History (last 10 signals fired today)
+    if "signals_history" not in st.session_state:
+        st.session_state.signals_history = []
+    if signal in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
+        cond_triggered = [CONDITION_LABELS[k] for k in range(8) if active_bools[k]]
+        st.session_state.signals_history.append({
+            "Time (ET)": now_est,
+            "Type": signal,
+            "SPX": f"${spx['Close'].iloc[-1]:,.2f}",
+            "Conditions": ", ".join(cond_triggered[:3]) + ("..." if len(cond_triggered) > 3 else ""),
+        })
+        st.session_state.signals_history = st.session_state.signals_history[-10:]
+    st.subheader("Signal History")
+    if st.session_state.signals_history:
+        st.dataframe(pd.DataFrame(st.session_state.signals_history).iloc[::-1], use_container_width=True, hide_index=True)
     else:
-        st.info("No BUY/SELL signals yet. Conditions: BUY = RSI<40, Price>VWAP, MACD cross up, VIX<20. SELL = RSI>60, Price<VWAP, MACD cross down, VIX>20.")
+        st.info("No signals yet. BUY: 3 of 4 core (RSI<45, MACD>Signal, VIX<25, EMA9>EMA21) + 1 confirmation. SELL: 3 of 4 core (RSI>55, MACD<Signal, VIX≥22, EMA9<EMA21) + 1 confirmation.")
 
     # Auto-refresh note
     st.markdown("---")

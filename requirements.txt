@@ -3,3 +3,4 @@ yfinance>=0.2.36
 plotly>=5.18.0
 pandas>=2.0.0
 pytz
+python-dotenv>=1.0.0
