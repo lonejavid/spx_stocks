@@ -454,7 +454,7 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = Non
     n_buy = n_sell = 0
     first_buy_time = first_sell_time = None
     for i in range(1, len(df_spx)):
-        s = get_signal(df_spx.iloc[: i + 1], vix_value, data or {})
+        s = get_signal(df_spx.iloc[: i + 1], vix_value, data or {})[0]
         if s in ("BUY", "STRONG BUY"):
             n_buy += 1
             if first_buy_time is None:
@@ -474,14 +474,16 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = Non
     return {"close": close_final, "pct": pct, "n_buy": n_buy, "n_sell": n_sell, "best": best_str}
 
 
-def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None) -> str:
+def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
     """
-    BUY: 3 of 4 core (RSI<45, MACD>Signal, VIX<25, EMA9>EMA21) + at least 1 confirmation (AAPL green, MSFT green, QQQ above VWAP).
-    SELL: 3 of 4 core (RSI>55, MACD<Signal, VIX>=22, EMA9<EMA21) + at least 1 confirmation (AAPL red, MSFT red, QQQ below VWAP).
-    STRONG BUY/SELL: all 4 core + all 3 confirmations.
+    BUY: RSI < 45 (required) + at least 2 of (MACD>Signal, VIX<25, EMA9>EMA21) + at least 1 confirmation.
+    SELL: RSI > 55 (required) + at least 2 of (MACD<Signal, VIX>=22, EMA9<EMA21) + at least 1 confirmation.
+    STRONG: all 4 core + all 3 confirmations.
+    Returns (signal_str, debug_dict). debug_dict has rsi_ok, macd_ok, vix_ok, ema_ok for the direction that fired (or None).
+    Signal score (X/8) is never used here — only these core conditions + confirmations.
     """
     if df_spx.empty or len(df_spx) < 2:
-        return "WAIT"
+        return "WAIT", None
     data = data or {}
     i = len(df_spx) - 1
     row = df_spx.iloc[i]
@@ -491,39 +493,43 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None) -> str
     ema9 = row.get("EMA9")
     ema21 = row.get("EMA21")
     if pd.isna(rsi) or vix_value is None:
-        return "WAIT"
+        return "WAIT", None
     mc, sc = _macd_signal_cols(df_spx)
     macd_above = (mc and sc and df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
     macd_below = (mc and sc and df_spx[mc].iloc[i] < df_spx[sc].iloc[i])
-    # Core conditions (no VWAP in core to avoid contradiction with oversold)
-    core_buy = [
-        rsi < BUY_RSI_MAX,
-        macd_above,
-        vix_value < VIX_BUY_MAX,
-        (ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 > ema21),
-    ]
-    core_sell = [
-        rsi > SELL_RSI_MIN,
-        macd_below,
-        vix_value >= VIX_SELL_MIN,
-        (ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 < ema21),
-    ]
+    ema_ok_buy = ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 > ema21
+    ema_ok_sell = ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 < ema21
+
+    # Explicit named checks — RSI is required for BUY/SELL, not "3 of 4"
+    rsi_ok_buy = rsi < BUY_RSI_MAX
+    rsi_ok_sell = rsi > SELL_RSI_MIN
+    macd_ok_buy = macd_above
+    macd_ok_sell = macd_below
+    vix_ok_buy = vix_value < VIX_BUY_MAX
+    vix_ok_sell = vix_value >= VIX_SELL_MIN
+
+    # BUY: RSI < 45 required, then at least 2 of (MACD, VIX, EMA)
+    other_buy = sum([macd_ok_buy, vix_ok_buy, ema_ok_buy])
+    # SELL: RSI > 55 required, then at least 2 of (MACD, VIX, EMA)
+    other_sell = sum([macd_ok_sell, vix_ok_sell, ema_ok_sell])
+
     aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
     confirm_buy = [aapl_green, msft_green, qqq_above_vwap]
     confirm_sell = [not aapl_green, not msft_green, not qqq_above_vwap]
-    n_core_buy = sum(core_buy)
-    n_core_sell = sum(core_sell)
     n_confirm_buy = sum(confirm_buy)
     n_confirm_sell = sum(confirm_sell)
-    if n_core_buy >= 3 and n_confirm_buy >= 1:
-        if n_core_buy == 4 and n_confirm_buy == 3:
-            return "STRONG BUY"
-        return "BUY"
-    if n_core_sell >= 3 and n_confirm_sell >= 1:
-        if n_core_sell == 4 and n_confirm_sell == 3:
-            return "STRONG SELL"
-        return "SELL"
-    return "WAIT"
+
+    if rsi_ok_buy and other_buy >= 2 and n_confirm_buy >= 1:
+        debug = {"rsi_ok": rsi_ok_buy, "macd_ok": macd_ok_buy, "vix_ok": vix_ok_buy, "ema_ok": ema_ok_buy}
+        if other_buy == 3 and n_confirm_buy == 3:
+            return "STRONG BUY", debug
+        return "BUY", debug
+    if rsi_ok_sell and other_sell >= 2 and n_confirm_sell >= 1:
+        debug = {"rsi_ok": rsi_ok_sell, "macd_ok": macd_ok_sell, "vix_ok": vix_ok_sell, "ema_ok": ema_ok_sell}
+        if other_sell == 3 and n_confirm_sell == 3:
+            return "STRONG SELL", debug
+        return "SELL", debug
+    return "WAIT", None
 
 
 def _qwap(df: pd.DataFrame) -> pd.Series:
@@ -726,7 +732,7 @@ def run_dashboard():
         st.warning("Not enough SPX 5-minute data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
         return
     spx = add_indicators(spx)
-    signal = get_signal(spx, vix_value, data)
+    signal, signal_debug = get_signal(spx, vix_value, data)
     now_est = datetime.now(EST).strftime("%Y-%m-%d %H:%M ET")
     rsi_val = spx["RSI"].iloc[-1] if "RSI" in spx.columns else None
     if len(spx) < 10:
@@ -817,6 +823,16 @@ def run_dashboard():
     last_fired = st.session_state.get("slack_last_signal_time")
     if last_fired is not None:
         st.caption(f"Last signal fired at: {last_fired.strftime('%H:%M ET')}")
+
+    # Debug: show core condition values when BUY or SELL fires (signal score is never used for signal)
+    if signal in ("BUY", "STRONG BUY", "SELL", "STRONG SELL") and signal_debug is not None:
+        with st.expander("Debug: core conditions (used for signal only)"):
+            d = signal_debug
+            st.write(f"**rsi_ok:** {d.get('rsi_ok', '—')} (BUY: RSI<45; SELL: RSI>55)")
+            st.write(f"**macd_ok:** {d.get('macd_ok', '—')} (BUY: MACD>Signal; SELL: MACD<Signal)")
+            st.write(f"**vix_ok:** {d.get('vix_ok', '—')} (BUY: VIX<25; SELL: VIX≥22)")
+            st.write(f"**ema_ok:** {d.get('ema_ok', '—')} (BUY: EMA9>EMA21; SELL: EMA9<EMA21)")
+            st.caption("Signal is determined only by these 4 core conditions + confirmations; the 6/8 score is for display only.")
 
     # Slack: automatic alert for BUY/SELL/STRONG BUY/STRONG SELL (30 min cooldown per base type)
     base_type = _signal_base_type(signal)
