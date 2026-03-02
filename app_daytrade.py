@@ -497,8 +497,13 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
     mc, sc = _macd_signal_cols(df_spx)
     macd_above = (mc and sc and df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
     macd_below = (mc and sc and df_spx[mc].iloc[i] < df_spx[sc].iloc[i])
-    ema_ok_buy = ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 > ema21
-    ema_ok_sell = ema9 is not None and ema21 is not None and not pd.isna(ema9) and not pd.isna(ema21) and ema9 < ema21
+    # EMA: sustained above/below on current bar (not cross-only); cross is used only in 8-condition display
+    ema_ok_buy = ("EMA9" in df_spx.columns and "EMA21" in df_spx.columns and
+                  pd.notna(df_spx["EMA9"].iloc[i]) and pd.notna(df_spx["EMA21"].iloc[i]) and
+                  df_spx["EMA9"].iloc[i] > df_spx["EMA21"].iloc[i])
+    ema_ok_sell = ("EMA9" in df_spx.columns and "EMA21" in df_spx.columns and
+                   pd.notna(df_spx["EMA9"].iloc[i]) and pd.notna(df_spx["EMA21"].iloc[i]) and
+                   df_spx["EMA9"].iloc[i] < df_spx["EMA21"].iloc[i])
 
     # Explicit named checks — RSI is required for BUY/SELL, not "3 of 4"
     rsi_ok_buy = rsi < BUY_RSI_MAX
