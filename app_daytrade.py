@@ -114,6 +114,37 @@ CONDITION_LABELS = [
     "QQQ above/below VWAP",
 ]
 
+# Two-column display: separate labels per side (more descriptive)
+BUY_LABELS = [
+    "Price above VWAP",
+    "RSI < 45 (oversold)",
+    "EMA 9 crossed above EMA 21",
+    "MACD above signal line",
+    "VIX < 25 (calm market)",
+    "AAPL green today",
+    "MSFT green today",
+    "QQQ above VWAP",
+]
+SELL_LABELS = [
+    "Price below VWAP",
+    "RSI > 55 (overbought)",
+    "EMA 9 crossed below EMA 21",
+    "MACD below signal line",
+    "VIX ≥ 22 (elevated fear)",
+    "AAPL red today",
+    "MSFT red today",
+    "QQQ below VWAP",
+]
+
+
+def _condition_row_html(label: str, is_met: bool, side: str = "buy") -> str:
+    """Return HTML for one condition row: icon + label only (no colored bar). Used in BUY/SELL columns."""
+    icon = "✅" if is_met else "❌"
+    text_color = "#e0e0e0" if is_met else "#888888"
+    label_escaped = label.replace("<", "&lt;").replace(">", "&gt;")
+    return f"<div style='font-size: 13px; color: {text_color}; padding: 2px 0 6px 0;'>{icon} {label_escaped}</div>"
+
+
 # Trading windows EST (green zones)
 WINDOW1 = (10, 0), (11, 30)   # 10:00 - 11:30
 WINDOW2 = (14, 30), (15, 30)  # 2:30 PM - 3:30 PM
@@ -847,33 +878,99 @@ def run_dashboard():
 
     # Signal strength score X/8 with colored progress bar (0-3 red, 4-5 yellow, 6-8 green)
     score_val, buy_bools, sell_bools = get_signal_strength_conditions(spx, vix_value, data)
-    # RSI debug (condition #2) — in main area because st.sidebar inside @st.fragment is not allowed
-    with st.expander("RSI debug (condition #2)"):
-        rsi_raw = _rsi_scalar_at_row(spx, len(spx) - 1)
-        st.write("**RSI raw (last bar):**", rsi_raw if rsi_raw is not None else "None/NaN")
-        st.write("**rsi < 45 (BUY zone):**", rsi_raw < BUY_RSI_MAX if rsi_raw is not None else "—")
-        st.write("**rsi > 55 (SELL zone):**", rsi_raw > SELL_RSI_MIN if rsi_raw is not None else "—")
-        st.write("**buy_bools[1]:**", buy_bools[1])
-        st.write("**sell_bools[1]:**", sell_bools[1])
     show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
     active_bools = buy_bools if show_buy else sell_bools
-    # Score must match the checkmarks: count conditions met on either BUY or SELL (same as ✅ display)
+    # Two separate strength bars (no combined score)
     display_score = sum(1 for j in range(8) if (buy_bools[j] or sell_bools[j]))
-    if display_score <= 3:
-        bar_color = "#e74c3c"
-    elif display_score <= 5:
-        bar_color = "#f1c40f"
-    else:
-        bar_color = "#2ecc71"
-    st.markdown(f"**Signal strength:** {display_score}/8")
-    st.markdown(
-        f'<div style="background:rgba(80,85,95,0.5); border-radius:6px; height:10px; overflow:hidden;">'
-        f'<div style="background:{bar_color}; width:{display_score * 12.5}%; height:100%; border-radius:6px;"></div></div>',
-        unsafe_allow_html=True,
+    buy_count = sum(buy_bools)
+    sell_count = sum(sell_bools)
+    core_buy = sum(buy_bools[1:5])
+    conf_buy = sum(buy_bools[5:8])
+    core_sell = sum(sell_bools[1:5])
+    conf_sell = sum(sell_bools[5:8])
+    buy_ready = "🔥 READY TO FIRE" if (core_buy >= 3 and conf_buy >= 1) else f"Core: {core_buy}/4 needed | Conf: {conf_buy}/3 needed"
+    sell_ready = "🔥 READY TO FIRE" if (core_sell >= 3 and conf_sell >= 1) else f"Core: {core_sell}/4 needed | Conf: {conf_sell}/3 needed"
+    buy_pct = int(buy_count / 8 * 100)
+    buy_bar_color = (
+        "#1a1a1a" if buy_count <= 2 else
+        "#f0a500" if buy_count <= 4 else
+        "#00c853" if buy_count <= 6 else
+        "#00ff88"
     )
-    for j, label in enumerate(CONDITION_LABELS):
-        # Show ✅ if condition is met for BUY or SELL; ❌ only when both are False
-        st.write("✅" if (buy_bools[j] or sell_bools[j]) else "❌", label)
+    sell_pct = int(sell_count / 8 * 100)
+    sell_bar_color = (
+        "#1a1a1a" if sell_count <= 2 else
+        "#ff3d57" if sell_count <= 4 else
+        "#ff4444" if sell_count <= 6 else
+        "#ff0000"
+    )
+    bar_col1, bar_col2 = st.columns(2)
+    with bar_col1:
+        st.markdown(
+            f"""
+            <div style='margin-bottom:4px'>
+                <span style='color:#aaa; font-size:13px'>🟢 BUY strength: {buy_count}/8</span>
+            </div>
+            <div style='background:#1a1a1a; border-radius:6px; height:14px; width:100%; margin-bottom:6px'>
+                <div style='background:{buy_bar_color}; width:{buy_pct}%; height:14px; border-radius:6px'></div>
+            </div>
+            <div style='margin-bottom:12px'>
+                <small style='color:#888'>{buy_ready}</small>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with bar_col2:
+        st.markdown(
+            f"""
+            <div style='margin-bottom:4px'>
+                <span style='color:#aaa; font-size:13px'>🔴 SELL strength: {sell_count}/8</span>
+            </div>
+            <div style='background:#1a1a1a; border-radius:6px; height:14px; width:100%; margin-bottom:6px'>
+                <div style='background:{sell_bar_color}; width:{sell_pct}%; height:14px; border-radius:6px'></div>
+            </div>
+            <div style='margin-bottom:12px'>
+                <small style='color:#888'>{sell_ready}</small>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown("<hr style='border:1px solid #333; margin: 8px 0'>", unsafe_allow_html=True)
+    # Sustained EMA for 9th row in both columns (display only)
+    i_last = len(spx) - 1
+    sustained_ema_buy = sustained_ema_sell = False
+    if i_last >= 0 and "EMA9" in spx.columns and "EMA21" in spx.columns:
+        ema9 = spx["EMA9"].iloc[i_last]
+        ema21 = spx["EMA21"].iloc[i_last]
+        if pd.notna(ema9) and pd.notna(ema21):
+            sustained_ema_buy = float(ema9) > float(ema21)
+            sustained_ema_sell = float(ema9) < float(ema21)
+    # Neutral border for both panels; keep subtle background tint
+    col_buy, col_sell = st.columns(2)
+    with col_buy:
+        bg = "rgba(46,204,113,0.12)" if buy_count >= 3 else "transparent"
+        lines = ["<div style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
+        lines.append("<p style=\"margin:0 0 8px 0;\"><strong>🟢 BUY Conditions</strong></p>")
+        for j in range(8):
+            lines.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
+            if j == 4:
+                lines.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
+        lines.append(_condition_row_html("EMA 9 above EMA 21 (sustained)", sustained_ema_buy, side="buy"))
+        lines.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ BUY needs 3+ core + 1 confirmation</p>")
+        lines.append("</div>")
+        st.markdown("\n".join(lines), unsafe_allow_html=True)
+    with col_sell:
+        bg = "rgba(231,76,60,0.12)" if sell_count >= 3 else "transparent"
+        lines = ["<div style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
+        lines.append("<p style=\"margin:0 0 8px 0;\"><strong>🔴 SELL Conditions</strong></p>")
+        for j in range(8):
+            lines.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
+            if j == 4:
+                lines.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
+        lines.append(_condition_row_html("EMA 9 below EMA 21 (sustained)", sustained_ema_sell, side="sell"))
+        lines.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ SELL needs 3+ core + 1 confirmation</p>")
+        lines.append("</div>")
+        st.markdown("\n".join(lines), unsafe_allow_html=True)
 
     # Last signal fired at (for alerts)
     last_fired = st.session_state.get("slack_last_signal_time")
