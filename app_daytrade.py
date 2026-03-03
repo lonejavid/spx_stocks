@@ -405,6 +405,26 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def _rsi_scalar_at_row(df: pd.DataFrame, row_idx: int):
+    """
+    Return RSI as a plain float at row row_idx, or None if missing/NaN.
+    Tries column 'RSI' (built-in _rsi) then 'RSI_14' (pandas_ta). Coerces Series to scalar.
+    """
+    for col in ("RSI", "RSI_14"):
+        if col not in df.columns:
+            continue
+        val = df[col].iloc[row_idx]
+        if pd.isna(val):
+            return None
+        if hasattr(val, "item"):
+            return float(val.item())
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _macd_signal_cols(df: pd.DataFrame):
     """Return (macd_line_col, signal_line_col)."""
     sig = [c for c in df.columns if "MACDs" in str(c) or ("MACD" in str(c) and "signal" in str(c).lower() and "hist" not in str(c).lower())][:1]
@@ -491,12 +511,12 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
     data = data or {}
     i = len(df_spx) - 1
     row = df_spx.iloc[i]
-    rsi = row.get("RSI")
+    rsi = _rsi_scalar_at_row(df_spx, i)
     close = row["Close"]
     vwap = row.get("VWAP")
     ema9 = row.get("EMA9")
     ema21 = row.get("EMA21")
-    if pd.isna(rsi) or vix_value is None:
+    if rsi is None or vix_value is None:
         return "WAIT", None
     mc, sc = _macd_signal_cols(df_spx)
     macd_above = (mc and sc and df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
@@ -509,7 +529,7 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
                    pd.notna(df_spx["EMA9"].iloc[i]) and pd.notna(df_spx["EMA21"].iloc[i]) and
                    df_spx["EMA9"].iloc[i] < df_spx["EMA21"].iloc[i])
 
-    # Explicit named checks — RSI is required for BUY/SELL, not "3 of 4"
+    # Explicit named checks — RSI is required for BUY/SELL, not "3 of 4" (rsi is scalar from _rsi_scalar_at_row)
     rsi_ok_buy = rsi < BUY_RSI_MAX
     rsi_ok_sell = rsi > SELL_RSI_MIN
     macd_ok_buy = macd_above
@@ -562,15 +582,20 @@ def get_signal_strength_conditions(df_spx: pd.DataFrame, vix_value: float, data:
     row = df_spx.iloc[i]
     close = row["Close"]
     vwap = row.get("VWAP")
-    rsi_val = row.get("RSI")
-    # 1. Price above/below VWAP
+    # RSI: resolve column (RSI or RSI_14) and coerce to scalar float so comparison is bool, not Series
+    rsi_val = _rsi_scalar_at_row(df_spx, i)
+    # 1. Price above/below VWAP (coerce to scalar so we get bool, not Series)
     if vwap is not None and not pd.isna(vwap):
-        buy_bools[0] = close > vwap
-        sell_bools[0] = close < vwap
+        try:
+            c, v = float(close), float(vwap)
+            buy_bools[0] = bool(c > v)
+            sell_bools[0] = bool(c < v)
+        except (TypeError, ValueError):
+            pass
     # 2. RSI in BUY zone (<45) or SELL zone (>55)
-    if rsi_val is not None and not pd.isna(rsi_val):
-        buy_bools[1] = rsi_val < BUY_RSI_MAX
-        sell_bools[1] = rsi_val > SELL_RSI_MIN
+    if rsi_val is not None:
+        buy_bools[1] = bool(rsi_val < BUY_RSI_MAX)
+        sell_bools[1] = bool(rsi_val > SELL_RSI_MIN)
     # 3. EMA 9 crossed EMA 21 on current bar (for score only)
     buy_bools[2] = _ema_cross_above(df_spx, i)
     sell_bools[2] = _ema_cross_below(df_spx, i)
@@ -755,7 +780,7 @@ def run_dashboard():
     spx = add_indicators(spx)
     signal, signal_debug = get_signal(spx, vix_value, data)
     now_est = datetime.now(EST).strftime("%Y-%m-%d %H:%M ET")
-    rsi_val = spx["RSI"].iloc[-1] if "RSI" in spx.columns else None
+    rsi_val = _rsi_scalar_at_row(spx, len(spx) - 1)
     if len(spx) < 10:
         st.info(f"⏳ Market just opened — {len(spx)} bars so far.")
 
@@ -822,23 +847,33 @@ def run_dashboard():
 
     # Signal strength score X/8 with colored progress bar (0-3 red, 4-5 yellow, 6-8 green)
     score_val, buy_bools, sell_bools = get_signal_strength_conditions(spx, vix_value, data)
+    # RSI debug (condition #2) — in main area because st.sidebar inside @st.fragment is not allowed
+    with st.expander("RSI debug (condition #2)"):
+        rsi_raw = _rsi_scalar_at_row(spx, len(spx) - 1)
+        st.write("**RSI raw (last bar):**", rsi_raw if rsi_raw is not None else "None/NaN")
+        st.write("**rsi < 45 (BUY zone):**", rsi_raw < BUY_RSI_MAX if rsi_raw is not None else "—")
+        st.write("**rsi > 55 (SELL zone):**", rsi_raw > SELL_RSI_MIN if rsi_raw is not None else "—")
+        st.write("**buy_bools[1]:**", buy_bools[1])
+        st.write("**sell_bools[1]:**", sell_bools[1])
     show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
     active_bools = buy_bools if show_buy else sell_bools
-    active_score = sum(active_bools)
-    if active_score <= 3:
+    # Score must match the checkmarks: count conditions met on either BUY or SELL (same as ✅ display)
+    display_score = sum(1 for j in range(8) if (buy_bools[j] or sell_bools[j]))
+    if display_score <= 3:
         bar_color = "#e74c3c"
-    elif active_score <= 5:
+    elif display_score <= 5:
         bar_color = "#f1c40f"
     else:
         bar_color = "#2ecc71"
-    st.markdown(f"**Signal strength:** {active_score}/8")
+    st.markdown(f"**Signal strength:** {display_score}/8")
     st.markdown(
         f'<div style="background:rgba(80,85,95,0.5); border-radius:6px; height:10px; overflow:hidden;">'
-        f'<div style="background:{bar_color}; width:{active_score * 12.5}%; height:100%; border-radius:6px;"></div></div>',
+        f'<div style="background:{bar_color}; width:{display_score * 12.5}%; height:100%; border-radius:6px;"></div></div>',
         unsafe_allow_html=True,
     )
     for j, label in enumerate(CONDITION_LABELS):
-        st.write("✅" if active_bools[j] else "❌", label)
+        # Show ✅ if condition is met for BUY or SELL; ❌ only when both are False
+        st.write("✅" if (buy_bools[j] or sell_bools[j]) else "❌", label)
 
     # Last signal fired at (for alerts)
     last_fired = st.session_state.get("slack_last_signal_time")
@@ -863,7 +898,7 @@ def run_dashboard():
             r_str = f"{rsi_val:.1f}" if rsi_val is not None else "—"
             v_str = f"{vix_value:.1f}" if vix_value is not None else "—"
             time_short = datetime.now(EST).strftime("%I:%M %p ET").lstrip("0")
-            conditions_met = [CONDITION_LABELS[k] for k in range(8) if active_bools[k]]
+            conditions_met = [CONDITION_LABELS[k] for k in range(8) if (buy_bools[k] or sell_bools[k])]
             cond_str = ", ".join(conditions_met) if conditions_met else "—"
             mc, sc = _macd_signal_cols(spx)
             macd_status = "MACD > Signal" if (mc and sc and spx[mc].iloc[-1] > spx[sc].iloc[-1]) else "MACD < Signal"
@@ -871,7 +906,7 @@ def run_dashboard():
             msg = (
                 f"{emoji} *{signal} — SPX Day Trading*\n"
                 f"💰 *SPX Price:* ${spx_p:,.2f}\n"
-                f"📊 *Signal Score:* {active_score}/8\n"
+                f"📊 *Signal Score:* {display_score}/8\n"
                 f"⏰ *Time:* {time_short}\n"
                 f"📈 *RSI:* {r_str} | *VIX:* {v_str}\n"
                 f"📉 *MACD:* {macd_status}\n"
@@ -1104,7 +1139,7 @@ def run_dashboard():
     if "signals_history" not in st.session_state:
         st.session_state.signals_history = []
     if signal in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
-        cond_triggered = [CONDITION_LABELS[k] for k in range(8) if active_bools[k]]
+        cond_triggered = [CONDITION_LABELS[k] for k in range(8) if (buy_bools[k] or sell_bools[k])]
         st.session_state.signals_history.append({
             "Time (ET)": now_est,
             "Type": signal,
