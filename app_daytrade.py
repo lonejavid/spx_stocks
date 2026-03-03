@@ -118,6 +118,10 @@ CONDITION_LABELS = [
 WINDOW1 = (10, 0), (11, 30)   # 10:00 - 11:30
 WINDOW2 = (14, 30), (15, 30)  # 2:30 PM - 3:30 PM
 
+# Simulated intraday trading (fake capital for backtest-style P&L)
+SIM_STARTING_CAPITAL = 50000
+SIM_POSITION_SIZE = 10000
+
 # Relaxed thresholds for professional intraday (was 40/60/20)
 BUY_RSI_MAX = 45
 SELL_RSI_MIN = 55
@@ -726,6 +730,18 @@ def run_dashboard():
 
     is_market_open, show_date, data_label = _market_open_and_display_date()
     show_date_str = show_date.isoformat() if hasattr(show_date, "isoformat") else str(show_date)
+    today_et = datetime.now(EST).date()
+    # Simulated intraday: one position at a time; reset state when date changes
+    if "sim_trades" not in st.session_state:
+        st.session_state.sim_trades = []
+    if "sim_position" not in st.session_state:
+        st.session_state.sim_position = None
+    if "sim_date" not in st.session_state:
+        st.session_state.sim_date = None
+    if st.session_state.sim_date != today_et:
+        st.session_state.sim_trades = []
+        st.session_state.sim_position = None
+        st.session_state.sim_date = today_et
     if not is_market_open:
         data = fetch_all_intraday(show_date_str)
     else:
@@ -889,11 +905,74 @@ def run_dashboard():
         except Exception:
             pass
 
+    # Simulated intraday: open position on BUY/STRONG BUY, close on SELL/STRONG SELL
+    current_price = float(spx["Close"].iloc[-1])
+    last_ts = spx.index[-1]
+    if signal in ("BUY", "STRONG BUY") and st.session_state.sim_position is None:
+        st.session_state.sim_position = {
+            "entry_time": last_ts,
+            "entry_price": current_price,
+            "amount": SIM_POSITION_SIZE,
+            "signal": signal,
+        }
+    elif signal in ("SELL", "STRONG SELL") and st.session_state.sim_position is not None:
+        pos = st.session_state.sim_position
+        exit_price = current_price
+        pnl_pct = (exit_price / pos["entry_price"] - 1) * 100
+        pnl_dollars = pos["amount"] * (exit_price / pos["entry_price"] - 1)
+        entry_ts = pos["entry_time"]
+        try:
+            delta = pd.Timestamp(last_ts) - pd.Timestamp(entry_ts)
+            total_mins = int(delta.total_seconds() / 60)
+            time_str = f"{total_mins // 60}h {total_mins % 60}m"
+        except Exception:
+            time_str = "—"
+        buy_time_str = pd.Timestamp(entry_ts).strftime("%I:%M %p") if hasattr(pd.Timestamp(entry_ts), "strftime") else str(entry_ts)
+        sell_time_str = pd.Timestamp(last_ts).strftime("%I:%M %p") if hasattr(pd.Timestamp(last_ts), "strftime") else str(last_ts)
+        st.session_state.sim_trades.append({
+            "Signal": f"{pos['signal']} → {signal}",
+            "Buy time": buy_time_str,
+            "Sell time": sell_time_str,
+            "Entry price": pos["entry_price"],
+            "Exit price": exit_price,
+            "Time in trade": time_str,
+            "P&L %": round(pnl_pct, 2),
+            "P&L $": round(pnl_dollars, 2),
+        })
+        st.session_state.sim_position = None
+
     st.markdown("---")
 
     # When closed: summary card (SPX close, % change, BUY/SELL counts, best signal)
     if not is_market_open:
         stats = _daily_signal_stats(spx, vix_value, data)
+        # Close any open sim position at session close
+        if st.session_state.sim_position is not None and stats:
+            pos = st.session_state.sim_position
+            exit_price = float(stats["close"])
+            pnl_pct = (exit_price / pos["entry_price"] - 1) * 100
+            pnl_dollars = pos["amount"] * (exit_price / pos["entry_price"] - 1)
+            entry_ts = pos["entry_time"]
+            last_ts_close = spx.index[-1]
+            try:
+                delta = pd.Timestamp(last_ts_close) - pd.Timestamp(entry_ts)
+                total_mins = int(delta.total_seconds() / 60)
+                time_str = f"{total_mins // 60}h {total_mins % 60}m"
+            except Exception:
+                time_str = "—"
+            buy_time_str = pd.Timestamp(entry_ts).strftime("%I:%M %p") if hasattr(pd.Timestamp(entry_ts), "strftime") else str(entry_ts)
+            sell_time_str = pd.Timestamp(last_ts_close).strftime("%I:%M %p") if hasattr(pd.Timestamp(last_ts_close), "strftime") else str(last_ts_close)
+            st.session_state.sim_trades.append({
+                "Signal": f"{pos['signal']} → EOD",
+                "Buy time": buy_time_str,
+                "Sell time": sell_time_str,
+                "Entry price": pos["entry_price"],
+                "Exit price": exit_price,
+                "Time in trade": time_str,
+                "P&L %": round(pnl_pct, 2),
+                "P&L $": round(pnl_dollars, 2),
+            })
+            st.session_state.sim_position = None
         if stats:
             st.subheader(f"Session summary — {show_date_str}")
             s1, s2, s3, s4, s5 = st.columns(5)
@@ -908,6 +987,34 @@ def run_dashboard():
             with s5:
                 st.markdown("**Best signal**<br><span class=\"signal-value\" style='color:#b0b4bc;'>" + stats["best"] + "</span>", unsafe_allow_html=True)
             st.markdown("---")
+
+    # Simulated intraday trading (fake $50k; $10k per position; track P&L as if we traded on signals)
+    st.subheader("Simulated intraday trading")
+    st.caption(f"Starting capital ${SIM_STARTING_CAPITAL:,} · Position size ${SIM_POSITION_SIZE:,} (simulation only — for intraday buy/sell same day)")
+    total_pnl = sum(t["P&L $"] for t in st.session_state.sim_trades)
+    ending_balance = SIM_STARTING_CAPITAL + total_pnl
+    sim_c1, sim_c2, sim_c3 = st.columns(3)
+    with sim_c1:
+        st.metric("Starting capital", f"${SIM_STARTING_CAPITAL:,}")
+    with sim_c2:
+        st.metric("Today's P&L", f"${total_pnl:+,.2f}")
+    with sim_c3:
+        st.metric("Ending balance", f"${ending_balance:,.2f}")
+    if st.session_state.sim_position is not None:
+        pos = st.session_state.sim_position
+        entry_t = pd.Timestamp(pos["entry_time"]).strftime("%I:%M %p") if hasattr(pd.Timestamp(pos["entry_time"]), "strftime") else str(pos["entry_time"])
+        st.info(f"📌 **Open position:** entered at ${pos['entry_price']:,.2f} at {entry_t} (${pos['amount']:,}) — waiting for SELL signal or EOD.")
+    if st.session_state.sim_trades:
+        df_sim = pd.DataFrame(st.session_state.sim_trades)
+        df_sim["Entry price"] = df_sim["Entry price"].apply(lambda x: f"${x:,.2f}")
+        df_sim["Exit price"] = df_sim["Exit price"].apply(lambda x: f"${x:,.2f}")
+        df_sim["P&L %"] = df_sim["P&L %"].apply(lambda x: f"{x:+.2f}%")
+        df_sim["P&L $"] = df_sim["P&L $"].apply(lambda x: f"${x:+,.2f}")
+        st.dataframe(df_sim, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No completed trades yet. BUY opens a $10k position; SELL closes it and records P&L. Positions are closed at session end if still open.")
+
+    st.markdown("---")
 
     # SPX intraday: clean line chart only (9:30 AM–4:00 PM ET data)
     chart_spx = spx[~spx.index.duplicated(keep="first")].sort_index()
