@@ -84,6 +84,8 @@ p { color: #8892a0 !important; }
 }
 /* Ensure viewport */
 @viewport { width: device-width; initial-scale: 1; }
+/* BUY/SELL condition panels: show all rows (no clipping) */
+.buy-sell-panel { overflow: visible !important; min-height: 1px; }
 </style>
 """
 
@@ -628,25 +630,25 @@ def get_signal_strength_conditions(df_spx: pd.DataFrame, vix_value: float, data:
         buy_bools[1] = bool(rsi_val < BUY_RSI_MAX)
         sell_bools[1] = bool(rsi_val > SELL_RSI_MIN)
     # 3. EMA 9 crossed EMA 21 on current bar (for score only)
-    buy_bools[2] = _ema_cross_above(df_spx, i)
-    sell_bools[2] = _ema_cross_below(df_spx, i)
+    buy_bools[2] = bool(_ema_cross_above(df_spx, i))
+    sell_bools[2] = bool(_ema_cross_below(df_spx, i))
     # 4. MACD above/below signal (sustained, not just cross)
     mc, sc = _macd_signal_cols(df_spx)
     if mc and sc:
-        buy_bools[3] = df_spx[mc].iloc[i] > df_spx[sc].iloc[i]
-        sell_bools[3] = df_spx[mc].iloc[i] < df_spx[sc].iloc[i]
+        buy_bools[3] = bool(df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
+        sell_bools[3] = bool(df_spx[mc].iloc[i] < df_spx[sc].iloc[i])
     # 5. VIX < 25 (BUY) / >= 22 (SELL)
     if vix_value is not None:
-        buy_bools[4] = vix_value < VIX_BUY_MAX
-        sell_bools[4] = vix_value >= VIX_SELL_MIN
+        buy_bools[4] = bool(vix_value < VIX_BUY_MAX)
+        sell_bools[4] = bool(vix_value >= VIX_SELL_MIN)
     # 6–8. AAPL, MSFT, QQQ
     aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
-    buy_bools[5] = aapl_green
-    sell_bools[5] = not aapl_green
-    buy_bools[6] = msft_green
-    sell_bools[6] = not msft_green
-    buy_bools[7] = qqq_above_vwap
-    sell_bools[7] = not qqq_above_vwap
+    buy_bools[5] = bool(aapl_green)
+    sell_bools[5] = bool(not aapl_green)
+    buy_bools[6] = bool(msft_green)
+    sell_bools[6] = bool(not msft_green)
+    buy_bools[7] = bool(qqq_above_vwap)
+    sell_bools[7] = bool(not qqq_above_vwap)
     buy_score = sum(buy_bools)
     sell_score = sum(sell_bools)
     return max(buy_score, sell_score), buy_bools, sell_bools
@@ -880,7 +882,7 @@ def run_dashboard():
     score_val, buy_bools, sell_bools = get_signal_strength_conditions(spx, vix_value, data)
     show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
     active_bools = buy_bools if show_buy else sell_bools
-    # Two separate strength bars (no combined score)
+    # Two separate strength bars (no combined score); score is /8 (sustained EMA row is info only)
     display_score = sum(1 for j in range(8) if (buy_bools[j] or sell_bools[j]))
     buy_count = sum(buy_bools)
     sell_count = sum(sell_bools)
@@ -891,18 +893,20 @@ def run_dashboard():
     buy_ready = "🔥 READY TO FIRE" if (core_buy >= 3 and conf_buy >= 1) else f"Core: {core_buy}/4 needed | Conf: {conf_buy}/3 needed"
     sell_ready = "🔥 READY TO FIRE" if (core_sell >= 3 and conf_sell >= 1) else f"Core: {core_sell}/4 needed | Conf: {conf_sell}/3 needed"
     buy_pct = int(buy_count / 8 * 100)
+    # BUY bar: always green shades (weak → strong)
     buy_bar_color = (
-        "#1a1a1a" if buy_count <= 2 else
-        "#f0a500" if buy_count <= 4 else
+        "#1a5e35" if buy_count <= 2 else
+        "#2e7d32" if buy_count <= 4 else
         "#00c853" if buy_count <= 6 else
-        "#00ff88"
+        "#00e676"
     )
     sell_pct = int(sell_count / 8 * 100)
+    # SELL bar: always red shades (weak → strong)
     sell_bar_color = (
-        "#1a1a1a" if sell_count <= 2 else
-        "#ff3d57" if sell_count <= 4 else
-        "#ff4444" if sell_count <= 6 else
-        "#ff0000"
+        "#5e1a1a" if sell_count <= 2 else
+        "#7d2e2e" if sell_count <= 4 else
+        "#d32f2f" if sell_count <= 6 else
+        "#ff3d57"
     )
     bar_col1, bar_col2 = st.columns(2)
     with bar_col1:
@@ -949,28 +953,38 @@ def run_dashboard():
     col_buy, col_sell = st.columns(2)
     with col_buy:
         bg = "rgba(46,204,113,0.12)" if buy_count >= 3 else "transparent"
-        lines = ["<div style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
-        lines.append("<p style=\"margin:0 0 8px 0;\"><strong>🟢 BUY Conditions</strong></p>")
-        for j in range(8):
-            lines.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
-            if j == 4:
-                lines.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
-        lines.append(_condition_row_html("EMA 9 above EMA 21 (sustained)", sustained_ema_buy, side="buy"))
-        lines.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ BUY needs 3+ core + 1 confirmation</p>")
-        lines.append("</div>")
-        st.markdown("\n".join(lines), unsafe_allow_html=True)
+        # Part 1: header + core conditions (0-4) + divider — ensures first 5 rows always visible
+        lines1 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
+        lines1.append("<p style=\"margin:0 0 8px 0;\"><strong>🟢 BUY Conditions</strong></p>")
+        for j in range(5):
+            lines1.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
+        lines1.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
+        lines1.append("</div>")
+        st.markdown("\n".join(lines1), unsafe_allow_html=True)
+        # Part 2: confirmations (5-7) + sustained EMA + footer — ensures last 4 rows always visible
+        lines2 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:0 0 8px 8px; padding:0 12px 10px 12px; border:1px solid #1e2a35; border-top:none; margin-top:-1px;\">"]
+        for j in range(5, 8):
+            lines2.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
+        lines2.append(_condition_row_html("EMA 9 above EMA 21 (sustained, info only)", sustained_ema_buy, side="buy"))
+        lines2.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ BUY needs 3+ core + 1 confirmation</p>")
+        lines2.append("</div>")
+        st.markdown("\n".join(lines2), unsafe_allow_html=True)
     with col_sell:
         bg = "rgba(231,76,60,0.12)" if sell_count >= 3 else "transparent"
-        lines = ["<div style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
-        lines.append("<p style=\"margin:0 0 8px 0;\"><strong>🔴 SELL Conditions</strong></p>")
-        for j in range(8):
-            lines.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
-            if j == 4:
-                lines.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
-        lines.append(_condition_row_html("EMA 9 below EMA 21 (sustained)", sustained_ema_sell, side="sell"))
-        lines.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ SELL needs 3+ core + 1 confirmation</p>")
-        lines.append("</div>")
-        st.markdown("\n".join(lines), unsafe_allow_html=True)
+        lines1 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
+        lines1.append("<p style=\"margin:0 0 8px 0;\"><strong>🔴 SELL Conditions</strong></p>")
+        for j in range(5):
+            lines1.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
+        lines1.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
+        lines1.append("</div>")
+        st.markdown("\n".join(lines1), unsafe_allow_html=True)
+        lines2 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:0 0 8px 8px; padding:0 12px 10px 12px; border:1px solid #1e2a35; border-top:none; margin-top:-1px;\">"]
+        for j in range(5, 8):
+            lines2.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
+        lines2.append(_condition_row_html("EMA 9 below EMA 21 (sustained, info only)", sustained_ema_sell, side="sell"))
+        lines2.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ SELL needs 3+ core + 1 confirmation</p>")
+        lines2.append("</div>")
+        st.markdown("\n".join(lines2), unsafe_allow_html=True)
 
     # Last signal fired at (for alerts)
     last_fired = st.session_state.get("slack_last_signal_time")
