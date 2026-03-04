@@ -848,9 +848,9 @@ def run_dashboard():
         st.title("SPX Day Trading Dashboard")
         st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
-        st.markdown("<br>", unsafe_allow_html=True)  # align button with title
-        if st.button("📊 Analytics", type="secondary", use_container_width=True):
-            st.switch_page("pages/Analytics.py")
+        st.markdown("<br>", unsafe_allow_html=True)  # align with title
+        # Use page_link so navigation works inside @st.fragment (switch_page is not allowed in fragments on Streamlit Cloud)
+        st.page_link("pages/Analytics.py", label="Analytics", icon="📊")
 
     is_market_open, show_date, data_label = _market_open_and_display_date()
     show_date_str = show_date.isoformat() if hasattr(show_date, "isoformat") else str(show_date)
