@@ -849,7 +849,7 @@ def _dashboard_header():
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
         st.title("SPX Day Trading Dashboard")
-        st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
+        st.caption("5-min gyyyguuiu intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("📊 Open **Analytics** via the **sidebar** (←)")
