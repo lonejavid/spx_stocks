@@ -3,6 +3,7 @@ SPX Day Trading Dashboard — 5-min intraday, RSI/MACD/VWAP/EMA, BUY/SELL signal
 Auto-refresh every 5 minutes. Best windows: 10:00–11:30 AM & 2:30–3:30 PM EST.
 """
 import json
+import math
 import os
 
 # Load .env so SLACK_WEBHOOK_URL and POLYGON_API_KEY are available
@@ -137,6 +138,32 @@ SELL_LABELS = [
     "MSFT red today",
     "QQQ below VWAP",
 ]
+
+# Persist condition checkboxes across refreshes (file-based; no localStorage in Streamlit)
+CONDITION_PERSISTENCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dashboard_conditions.json")
+
+
+def _load_condition_flags() -> tuple:
+    """Return (enabled_buy: list of 8 bools, enabled_sell: list of 8 bools). Default all True."""
+    try:
+        if os.path.isfile(CONDITION_PERSISTENCE_PATH):
+            with open(CONDITION_PERSISTENCE_PATH, "r") as f:
+                d = json.load(f)
+            buy = d.get("enabled_buy", [True] * 8)
+            sell = d.get("enabled_sell", [True] * 8)
+            return (([bool(b) for b in buy] + [True] * 8)[:8], ([bool(s) for s in sell] + [True] * 8)[:8])
+    except Exception:
+        pass
+    return ([True] * 8, [True] * 8)
+
+
+def _save_condition_flags(enabled_buy: list, enabled_sell: list) -> None:
+    """Persist checkbox state to JSON file."""
+    try:
+        with open(CONDITION_PERSISTENCE_PATH, "w") as f:
+            json.dump({"enabled_buy": enabled_buy, "enabled_sell": enabled_sell}, f, indent=0)
+    except Exception:
+        pass
 
 
 def _condition_row_html(label: str, is_met: bool, side: str = "buy") -> str:
@@ -501,8 +528,8 @@ def _get_confirmation_bools(data: dict) -> tuple:
     return aapl_green, msft_green, qqq_above_vwap
 
 
-def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
-    """For displayed day: close, pct_change, n_buy, n_sell, first_buy_time, first_sell_time."""
+def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = None, enabled_buy: list = None, enabled_sell: list = None):
+    """For displayed day: close, pct_change, n_buy, n_sell, first_buy_time, first_sell_time. Uses enabled_buy/enabled_sell when provided."""
     if df_spx.empty or len(df_spx) < 2:
         return None
     close_final = df_spx["Close"].iloc[-1]
@@ -511,7 +538,7 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = Non
     n_buy = n_sell = 0
     first_buy_time = first_sell_time = None
     for i in range(1, len(df_spx)):
-        s = get_signal(df_spx.iloc[: i + 1], vix_value, data or {})[0]
+        s = get_signal(df_spx.iloc[: i + 1], vix_value, data or {}, enabled_buy, enabled_sell)[0]
         if s in ("BUY", "STRONG BUY"):
             n_buy += 1
             if first_buy_time is None:
@@ -531,17 +558,21 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = Non
     return {"close": close_final, "pct": pct, "n_buy": n_buy, "n_sell": n_sell, "best": best_str}
 
 
-def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
+def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None, enabled_buy: list = None, enabled_sell: list = None):
     """
-    BUY: RSI < 45 (required) + at least 2 of (MACD>Signal, VIX<25, EMA9>EMA21) + at least 1 confirmation.
-    SELL: RSI > 55 (required) + at least 2 of (MACD<Signal, VIX>=22, EMA9<EMA21) + at least 1 confirmation.
-    STRONG: all 4 core + all 3 confirmations.
-    Returns (signal_str, debug_dict). debug_dict has rsi_ok, macd_ok, vix_ok, ema_ok for the direction that fired (or None).
-    Signal score (X/8) is never used here — only these core conditions + confirmations.
+    BUY/SELL using only enabled conditions. When enabled_* is None, all 8 conditions are used (original logic).
+    Dynamic thresholds: core need = ceil(0.75 * n_core_enabled), conf need = 1 if any conf enabled else 0.
+    If exactly one condition is enabled and it is met, signal fires (BUY or SELL).
+    Returns (signal_str, debug_dict).
     """
     if df_spx.empty or len(df_spx) < 2:
         return "WAIT", None
     data = data or {}
+    enabled_buy = enabled_buy if enabled_buy is not None else [True] * 8
+    enabled_sell = enabled_sell if enabled_sell is not None else [True] * 8
+    enabled_buy = ([bool(x) for x in enabled_buy] + [True] * 8)[:8]
+    enabled_sell = ([bool(x) for x in enabled_sell] + [True] * 8)[:8]
+
     i = len(df_spx) - 1
     row = df_spx.iloc[i]
     rsi = _rsi_scalar_at_row(df_spx, i)
@@ -554,41 +585,70 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None):
     mc, sc = _macd_signal_cols(df_spx)
     macd_above = (mc and sc and df_spx[mc].iloc[i] > df_spx[sc].iloc[i])
     macd_below = (mc and sc and df_spx[mc].iloc[i] < df_spx[sc].iloc[i])
-    # EMA: sustained above/below on current bar (not cross-only); cross is used only in 8-condition display
     ema_ok_buy = ("EMA9" in df_spx.columns and "EMA21" in df_spx.columns and
                   pd.notna(df_spx["EMA9"].iloc[i]) and pd.notna(df_spx["EMA21"].iloc[i]) and
                   df_spx["EMA9"].iloc[i] > df_spx["EMA21"].iloc[i])
     ema_ok_sell = ("EMA9" in df_spx.columns and "EMA21" in df_spx.columns and
                    pd.notna(df_spx["EMA9"].iloc[i]) and pd.notna(df_spx["EMA21"].iloc[i]) and
                    df_spx["EMA9"].iloc[i] < df_spx["EMA21"].iloc[i])
-
-    # Explicit named checks — RSI is required for BUY/SELL, not "3 of 4" (rsi is scalar from _rsi_scalar_at_row)
     rsi_ok_buy = rsi < BUY_RSI_MAX
     rsi_ok_sell = rsi > SELL_RSI_MIN
-    macd_ok_buy = macd_above
-    macd_ok_sell = macd_below
     vix_ok_buy = vix_value < VIX_BUY_MAX
     vix_ok_sell = vix_value >= VIX_SELL_MIN
-
-    # BUY: RSI < 45 required, then at least 2 of (MACD, VIX, EMA)
-    other_buy = sum([macd_ok_buy, vix_ok_buy, ema_ok_buy])
-    # SELL: RSI > 55 required, then at least 2 of (MACD, VIX, EMA)
-    other_sell = sum([macd_ok_sell, vix_ok_sell, ema_ok_sell])
-
     aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
-    confirm_buy = [aapl_green, msft_green, qqq_above_vwap]
-    confirm_sell = [not aapl_green, not msft_green, not qqq_above_vwap]
-    n_confirm_buy = sum(confirm_buy)
-    n_confirm_sell = sum(confirm_sell)
+    price_above_vwap = (vwap is not None and not pd.isna(vwap) and float(close) > float(vwap))
+    price_below_vwap = (vwap is not None and not pd.isna(vwap) and float(close) < float(vwap))
+    ema_cross_above = _ema_cross_above(df_spx, i)
+    ema_cross_below = _ema_cross_below(df_spx, i)
 
-    if rsi_ok_buy and other_buy >= 2 and n_confirm_buy >= 1:
-        debug = {"rsi_ok": rsi_ok_buy, "macd_ok": macd_ok_buy, "vix_ok": vix_ok_buy, "ema_ok": ema_ok_buy}
-        if other_buy == 3 and n_confirm_buy == 3:
+    # Per-condition bools: BUY [0]=VWAP, [1]=RSI, [2]=EMA cross, [3]=MACD, [4]=VIX, [5]=AAPL, [6]=MSFT, [7]=QQQ
+    buy_bools = [price_above_vwap, rsi_ok_buy, ema_cross_above, macd_above, vix_ok_buy, aapl_green, msft_green, qqq_above_vwap]
+    sell_bools = [price_below_vwap, rsi_ok_sell, ema_cross_below, macd_below, vix_ok_sell, not aapl_green, not msft_green, not qqq_above_vwap]
+
+    n_buy_enabled = sum(enabled_buy)
+    n_sell_enabled = sum(enabled_sell)
+    # Single condition: if only one enabled and it's met, fire
+    if n_buy_enabled == 1:
+        idx = next((j for j in range(8) if enabled_buy[j]), 0)
+        if buy_bools[idx]:
+            return "BUY", {"rsi_ok": rsi_ok_buy, "macd_ok": macd_above, "vix_ok": vix_ok_buy, "ema_ok": ema_ok_buy}
+    if n_sell_enabled == 1:
+        idx = next((j for j in range(8) if enabled_sell[j]), 0)
+        if sell_bools[idx]:
+            return "SELL", {"rsi_ok": rsi_ok_sell, "macd_ok": macd_below, "vix_ok": vix_ok_sell, "ema_ok": ema_ok_sell}
+
+    if n_buy_enabled == 0 and n_sell_enabled == 0:
+        return "WAIT", None
+
+    # Core = indices 1..4 (RSI, EMA cross, MACD, VIX), Conf = 5..7
+    n_core_buy = sum(enabled_buy[1:5])
+    n_conf_buy = sum(enabled_buy[5:8])
+    need_core_buy = math.ceil(0.75 * n_core_buy) if n_core_buy else 0
+    need_conf_buy = 1 if n_conf_buy else 0
+    core_buy_met = sum(buy_bools[j] for j in range(1, 5) if enabled_buy[j])
+    conf_buy_met = sum(buy_bools[j] for j in range(5, 8) if enabled_buy[j])
+    buy_ok = (need_core_buy <= core_buy_met and need_conf_buy <= conf_buy_met)
+    if enabled_buy[1] and not rsi_ok_buy:
+        buy_ok = False
+
+    n_core_sell = sum(enabled_sell[1:5])
+    n_conf_sell = sum(enabled_sell[5:8])
+    need_core_sell = math.ceil(0.75 * n_core_sell) if n_core_sell else 0
+    need_conf_sell = 1 if n_conf_sell else 0
+    core_sell_met = sum(sell_bools[j] for j in range(1, 5) if enabled_sell[j])
+    conf_sell_met = sum(sell_bools[j] for j in range(5, 8) if enabled_sell[j])
+    sell_ok = (need_core_sell <= core_sell_met and need_conf_sell <= conf_sell_met)
+    if enabled_sell[1] and not rsi_ok_sell:
+        sell_ok = False
+
+    if buy_ok and (not sell_ok or (core_buy_met == n_core_buy and conf_buy_met == n_conf_buy)):
+        debug = {"rsi_ok": rsi_ok_buy, "macd_ok": macd_above, "vix_ok": vix_ok_buy, "ema_ok": ema_ok_buy}
+        if n_core_buy and n_conf_buy and core_buy_met == n_core_buy and conf_buy_met == n_conf_buy:
             return "STRONG BUY", debug
         return "BUY", debug
-    if rsi_ok_sell and other_sell >= 2 and n_confirm_sell >= 1:
-        debug = {"rsi_ok": rsi_ok_sell, "macd_ok": macd_ok_sell, "vix_ok": vix_ok_sell, "ema_ok": ema_ok_sell}
-        if other_sell == 3 and n_confirm_sell == 3:
+    if sell_ok:
+        debug = {"rsi_ok": rsi_ok_sell, "macd_ok": macd_below, "vix_ok": vix_ok_sell, "ema_ok": ema_ok_sell}
+        if n_core_sell and n_conf_sell and core_sell_met == n_core_sell and conf_sell_met == n_conf_sell:
             return "STRONG SELL", debug
         return "SELL", debug
     return "WAIT", None
@@ -783,8 +843,14 @@ def trading_window_shapes(df: pd.DataFrame):
 
 def run_dashboard():
     st.markdown(DARK_CSS, unsafe_allow_html=True)
-    st.title("SPX Day Trading Dashboard")
-    st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
+    head_col1, head_col2 = st.columns([4, 1])
+    with head_col1:
+        st.title("SPX Day Trading Dashboard")
+        st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
+    with head_col2:
+        st.markdown("<br>", unsafe_allow_html=True)  # align button with title
+        if st.button("📊 Analytics", type="secondary", use_container_width=True):
+            st.switch_page("pages/Analytics.py")
 
     is_market_open, show_date, data_label = _market_open_and_display_date()
     show_date_str = show_date.isoformat() if hasattr(show_date, "isoformat") else str(show_date)
@@ -811,7 +877,16 @@ def run_dashboard():
         st.warning("Not enough SPX 5-minute data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
         return
     spx = add_indicators(spx)
-    signal, signal_debug = get_signal(spx, vix_value, data)
+    # Load condition checkboxes from file once (persist across refreshes)
+    if "dashboard_conditions_loaded" not in st.session_state:
+        eb, es = _load_condition_flags()
+        for j in range(8):
+            st.session_state["buy_enabled_%d" % j] = eb[j]
+            st.session_state["sell_enabled_%d" % j] = es[j]
+        st.session_state.dashboard_conditions_loaded = True
+    enabled_buy = [st.session_state.get("buy_enabled_%d" % j, True) for j in range(8)]
+    enabled_sell = [st.session_state.get("sell_enabled_%d" % j, True) for j in range(8)]
+    signal, signal_debug = get_signal(spx, vix_value, data, enabled_buy, enabled_sell)
     now_est = datetime.now(EST).strftime("%Y-%m-%d %H:%M ET")
     rsi_val = _rsi_scalar_at_row(spx, len(spx) - 1)
     if len(spx) < 10:
@@ -878,21 +953,32 @@ def run_dashboard():
     with c5:
         st.metric("Time (ET)", now_est)
 
-    # Signal strength score X/8 with colored progress bar (0-3 red, 4-5 yellow, 6-8 green)
+    # Signal strength: only count enabled conditions
     score_val, buy_bools, sell_bools = get_signal_strength_conditions(spx, vix_value, data)
-    show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and sum(buy_bools) >= sum(sell_bools))
-    active_bools = buy_bools if show_buy else sell_bools
-    # Two separate strength bars (no combined score); score is /8 (sustained EMA row is info only)
-    display_score = sum(1 for j in range(8) if (buy_bools[j] or sell_bools[j]))
-    buy_count = sum(buy_bools)
-    sell_count = sum(sell_bools)
-    core_buy = sum(buy_bools[1:5])
-    conf_buy = sum(buy_bools[5:8])
-    core_sell = sum(sell_bools[1:5])
-    conf_sell = sum(sell_bools[5:8])
-    buy_ready = "🔥 READY TO FIRE" if (core_buy >= 3 and conf_buy >= 1) else f"Core: {core_buy}/4 needed | Conf: {conf_buy}/3 needed"
-    sell_ready = "🔥 READY TO FIRE" if (core_sell >= 3 and conf_sell >= 1) else f"Core: {core_sell}/4 needed | Conf: {conf_sell}/3 needed"
-    buy_pct = int(buy_count / 8 * 100)
+    n_buy_enabled = sum(enabled_buy)
+    n_sell_enabled = sum(enabled_sell)
+    buy_count = sum(buy_bools[j] for j in range(8) if enabled_buy[j])
+    sell_count = sum(sell_bools[j] for j in range(8) if enabled_sell[j])
+    core_buy_met = sum(buy_bools[j] for j in range(1, 5) if enabled_buy[j])
+    conf_buy_met = sum(buy_bools[j] for j in range(5, 8) if enabled_buy[j])
+    n_core_buy = sum(enabled_buy[1:5])
+    n_conf_buy = sum(enabled_buy[5:8])
+    need_core_buy = math.ceil(0.75 * n_core_buy) if n_core_buy else 0
+    need_conf_buy = 1 if n_conf_buy else 0
+    core_sell_met = sum(sell_bools[j] for j in range(1, 5) if enabled_sell[j])
+    conf_sell_met = sum(sell_bools[j] for j in range(5, 8) if enabled_sell[j])
+    n_core_sell = sum(enabled_sell[1:5])
+    n_conf_sell = sum(enabled_sell[5:8])
+    need_core_sell = math.ceil(0.75 * n_core_sell) if n_core_sell else 0
+    need_conf_sell = 1 if n_conf_sell else 0
+    show_buy = signal in ("BUY", "STRONG BUY") or (signal == "WAIT" and buy_count >= sell_count)
+    buy_ready = "🔥 READY TO FIRE" if (need_core_buy <= core_buy_met and need_conf_buy <= conf_buy_met) else f"Core: {core_buy_met}/{n_core_buy} needed | Conf: {conf_buy_met}/{n_conf_buy} needed"
+    sell_ready = "🔥 READY TO FIRE" if (need_core_sell <= core_sell_met and need_conf_sell <= conf_sell_met) else f"Core: {core_sell_met}/{n_core_sell} needed | Conf: {conf_sell_met}/{n_conf_sell} needed"
+    buy_denom = max(1, n_buy_enabled)
+    sell_denom = max(1, n_sell_enabled)
+    display_score = buy_count if show_buy else sell_count
+    display_score_denom = n_buy_enabled if show_buy else n_sell_enabled
+    buy_pct = int(buy_count / buy_denom * 100)
     # BUY bar: always green shades (weak → strong)
     buy_bar_color = (
         "#1a5e35" if buy_count <= 2 else
@@ -900,7 +986,7 @@ def run_dashboard():
         "#00c853" if buy_count <= 6 else
         "#00e676"
     )
-    sell_pct = int(sell_count / 8 * 100)
+    sell_pct = int(sell_count / sell_denom * 100)
     # SELL bar: always red shades (weak → strong)
     sell_bar_color = (
         "#5e1a1a" if sell_count <= 2 else
@@ -913,7 +999,7 @@ def run_dashboard():
         st.markdown(
             f"""
             <div style='margin-bottom:4px'>
-                <span style='color:#aaa; font-size:13px'>🟢 BUY strength: {buy_count}/8</span>
+                <span style='color:#aaa; font-size:13px'>🟢 BUY strength: {buy_count}/{n_buy_enabled}</span>
             </div>
             <div style='background:#1a1a1a; border-radius:6px; height:14px; width:100%; margin-bottom:6px'>
                 <div style='background:{buy_bar_color}; width:{buy_pct}%; height:14px; border-radius:6px'></div>
@@ -928,7 +1014,7 @@ def run_dashboard():
         st.markdown(
             f"""
             <div style='margin-bottom:4px'>
-                <span style='color:#aaa; font-size:13px'>🔴 SELL strength: {sell_count}/8</span>
+                <span style='color:#aaa; font-size:13px'>🔴 SELL strength: {sell_count}/{n_sell_enabled}</span>
             </div>
             <div style='background:#1a1a1a; border-radius:6px; height:14px; width:100%; margin-bottom:6px'>
                 <div style='background:{sell_bar_color}; width:{sell_pct}%; height:14px; border-radius:6px'></div>
@@ -949,42 +1035,57 @@ def run_dashboard():
         if pd.notna(ema9) and pd.notna(ema21):
             sustained_ema_buy = float(ema9) > float(ema21)
             sustained_ema_sell = float(ema9) < float(ema21)
-    # Neutral border for both panels; keep subtle background tint
+    # BUY/SELL panels with checkboxes — only checked conditions count toward signal
     col_buy, col_sell = st.columns(2)
     with col_buy:
-        bg = "rgba(46,204,113,0.12)" if buy_count >= 3 else "transparent"
-        # Part 1: header + core conditions (0-4) + divider — ensures first 5 rows always visible
-        lines1 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
-        lines1.append("<p style=\"margin:0 0 8px 0;\"><strong>🟢 BUY Conditions</strong></p>")
-        for j in range(5):
-            lines1.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
-        lines1.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
-        lines1.append("</div>")
-        st.markdown("\n".join(lines1), unsafe_allow_html=True)
-        # Part 2: confirmations (5-7) + sustained EMA + footer — ensures last 4 rows always visible
-        lines2 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:0 0 8px 8px; padding:0 12px 10px 12px; border:1px solid #1e2a35; border-top:none; margin-top:-1px;\">"]
-        for j in range(5, 8):
-            lines2.append(_condition_row_html(BUY_LABELS[j], buy_bools[j], side="buy"))
-        lines2.append(_condition_row_html("EMA 9 above EMA 21 (sustained, info only)", sustained_ema_buy, side="buy"))
-        lines2.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ BUY needs 3+ core + 1 confirmation</p>")
-        lines2.append("</div>")
-        st.markdown("\n".join(lines2), unsafe_allow_html=True)
+        bg = "rgba(46,204,113,0.12)" if (need_core_buy <= core_buy_met and need_conf_buy <= conf_buy_met) else "transparent"
+        st.markdown(f"<div class=\"buy-sell-panel\" style=\"background:{bg}; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\"><p style=\"margin:0 0 8px 0;\"><strong>🟢 BUY Conditions</strong></p></div>", unsafe_allow_html=True)
+        if st.button("Reset to default", key="reset_buy_conditions", use_container_width=True):
+            for j in range(8):
+                st.session_state["buy_enabled_%d" % j] = True
+            _save_condition_flags([True] * 8, [st.session_state.get("sell_enabled_%d" % j, True) for j in range(8)])
+            st.rerun()
+        for j in range(8):
+            if j == 5:
+                st.markdown("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>", unsafe_allow_html=True)
+            cb_col, label_col = st.columns([1, 8])
+            with cb_col:
+                st.checkbox(" ", key="buy_enabled_%d" % j, label_visibility="collapsed")
+            with label_col:
+                icon = "✅" if buy_bools[j] else "❌"
+                enabled = st.session_state.get("buy_enabled_%d" % j, True)
+                opacity = "1" if enabled else "0.45"
+                st.markdown(f"<div style='font-size:13px; color:#e0e0e0; padding:2px 0 6px 0; opacity:{opacity};'>{icon} {BUY_LABELS[j].replace('<', '&lt;').replace('>', '&gt;')}</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:13px; color:#e0e0e0; padding:2px 0 6px 0;'>✅ EMA 9 above EMA 21 (sustained, info only)</div>" if sustained_ema_buy else "<div style='font-size:13px; color:#888; padding:2px 0 6px 0;'>❌ EMA 9 above EMA 21 (sustained, info only)</div>", unsafe_allow_html=True)
+        st.markdown(f"<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ BUY needs {need_core_buy}+ core + {need_conf_buy} confirmation (of {n_core_buy} core, {n_conf_buy} conf enabled)</p>", unsafe_allow_html=True)
     with col_sell:
-        bg = "rgba(231,76,60,0.12)" if sell_count >= 3 else "transparent"
-        lines1 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\">"]
-        lines1.append("<p style=\"margin:0 0 8px 0;\"><strong>🔴 SELL Conditions</strong></p>")
-        for j in range(5):
-            lines1.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
-        lines1.append("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>")
-        lines1.append("</div>")
-        st.markdown("\n".join(lines1), unsafe_allow_html=True)
-        lines2 = ["<div class=\"buy-sell-panel\" style=\"background:" + bg + "; border-radius:0 0 8px 8px; padding:0 12px 10px 12px; border:1px solid #1e2a35; border-top:none; margin-top:-1px;\">"]
-        for j in range(5, 8):
-            lines2.append(_condition_row_html(SELL_LABELS[j], sell_bools[j], side="sell"))
-        lines2.append(_condition_row_html("EMA 9 below EMA 21 (sustained, info only)", sustained_ema_sell, side="sell"))
-        lines2.append("<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ SELL needs 3+ core + 1 confirmation</p>")
-        lines2.append("</div>")
-        st.markdown("\n".join(lines2), unsafe_allow_html=True)
+        bg = "rgba(231,76,60,0.12)" if (need_core_sell <= core_sell_met and need_conf_sell <= conf_sell_met) else "transparent"
+        st.markdown(f"<div class=\"buy-sell-panel\" style=\"background:{bg}; border-radius:8px; padding:10px 12px; border:1px solid #1e2a35;\"><p style=\"margin:0 0 8px 0;\"><strong>🔴 SELL Conditions</strong></p></div>", unsafe_allow_html=True)
+        if st.button("Reset to default", key="reset_sell_conditions", use_container_width=True):
+            for j in range(8):
+                st.session_state["sell_enabled_%d" % j] = True
+            _save_condition_flags([st.session_state.get("buy_enabled_%d" % j, True) for j in range(8)], [True] * 8)
+            st.rerun()
+        for j in range(8):
+            if j == 5:
+                st.markdown("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>", unsafe_allow_html=True)
+            cb_col, label_col = st.columns([1, 8])
+            with cb_col:
+                st.checkbox(" ", key="sell_enabled_%d" % j, label_visibility="collapsed")
+            with label_col:
+                icon = "✅" if sell_bools[j] else "❌"
+                enabled = st.session_state.get("sell_enabled_%d" % j, True)
+                opacity = "1" if enabled else "0.45"
+                st.markdown(f"<div style='font-size:13px; color:#e0e0e0; padding:2px 0 6px 0; opacity:{opacity};'>{icon} {SELL_LABELS[j].replace('<', '&lt;').replace('>', '&gt;')}</div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:1px; background:#1e2a35; margin:6px 0;'></div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:13px; color:#e0e0e0; padding:2px 0 6px 0;'>✅ EMA 9 below EMA 21 (sustained, info only)</div>" if sustained_ema_sell else "<div style='font-size:13px; color:#888; padding:2px 0 6px 0;'>❌ EMA 9 below EMA 21 (sustained, info only)</div>", unsafe_allow_html=True)
+        st.markdown(f"<p style=\"margin:12px 0 0 0; color:#8892a0; font-size:0.85em;\">→ SELL needs {need_core_sell}+ core + {need_conf_sell} confirmation (of {n_core_sell} core, {n_conf_sell} conf enabled)</p>", unsafe_allow_html=True)
+    # Persist checkbox state to file (survives refresh)
+    _save_condition_flags(
+        [st.session_state.get("buy_enabled_%d" % j, True) for j in range(8)],
+        [st.session_state.get("sell_enabled_%d" % j, True) for j in range(8)],
+    )
 
     # Last signal fired at (for alerts)
     last_fired = st.session_state.get("slack_last_signal_time")
@@ -1009,7 +1110,7 @@ def run_dashboard():
             r_str = f"{rsi_val:.1f}" if rsi_val is not None else "—"
             v_str = f"{vix_value:.1f}" if vix_value is not None else "—"
             time_short = datetime.now(EST).strftime("%I:%M %p ET").lstrip("0")
-            conditions_met = [CONDITION_LABELS[k] for k in range(8) if (buy_bools[k] or sell_bools[k])]
+            conditions_met = [CONDITION_LABELS[k] for k in range(8) if (enabled_buy[k] or enabled_sell[k]) and (buy_bools[k] or sell_bools[k])]
             cond_str = ", ".join(conditions_met) if conditions_met else "—"
             mc, sc = _macd_signal_cols(spx)
             macd_status = "MACD > Signal" if (mc and sc and spx[mc].iloc[-1] > spx[sc].iloc[-1]) else "MACD < Signal"
@@ -1017,7 +1118,7 @@ def run_dashboard():
             msg = (
                 f"{emoji} *{signal} — SPX Day Trading*\n"
                 f"💰 *SPX Price:* ${spx_p:,.2f}\n"
-                f"📊 *Signal Score:* {display_score}/8\n"
+                f"📊 *Signal Score:* {display_score}/{display_score_denom}\n"
                 f"⏰ *Time:* {time_short}\n"
                 f"📈 *RSI:* {r_str} | *VIX:* {v_str}\n"
                 f"📉 *MACD:* {macd_status}\n"
@@ -1032,7 +1133,7 @@ def run_dashboard():
     # Slack: daily summary at 4:05–4:20 PM ET (once per day)
     if _should_send_daily_summary() and not spx.empty and len(spx) >= 2:
         try:
-            stats = _daily_signal_stats(spx, vix_value, data)
+            stats = _daily_signal_stats(spx, vix_value, data, enabled_buy, enabled_sell)
             if stats is not None:
                 today_str = datetime.now(EST).strftime("%Y-%m-%d")
                 r_close = f"{rsi_val:.1f}" if rsi_val is not None else "—"
@@ -1091,7 +1192,7 @@ def run_dashboard():
 
     # When closed: summary card (SPX close, % change, BUY/SELL counts, best signal)
     if not is_market_open:
-        stats = _daily_signal_stats(spx, vix_value, data)
+        stats = _daily_signal_stats(spx, vix_value, data, enabled_buy, enabled_sell)
         # Close any open sim position at session close
         if st.session_state.sim_position is not None and stats:
             pos = st.session_state.sim_position
@@ -1250,7 +1351,7 @@ def run_dashboard():
     if "signals_history" not in st.session_state:
         st.session_state.signals_history = []
     if signal in ("BUY", "SELL", "STRONG BUY", "STRONG SELL"):
-        cond_triggered = [CONDITION_LABELS[k] for k in range(8) if (buy_bools[k] or sell_bools[k])]
+        cond_triggered = [CONDITION_LABELS[k] for k in range(8) if (enabled_buy[k] or enabled_sell[k]) and (buy_bools[k] or sell_bools[k])]
         st.session_state.signals_history.append({
             "Time (ET)": now_est,
             "Type": signal,

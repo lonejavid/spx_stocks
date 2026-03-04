@@ -3,6 +3,9 @@
 .env.local
 *.env
 
+# Dashboard persisted settings (local checkbox state)
+.dashboard_conditions.json
+
 # Python
 __pycache__/
 *.py[cod]
