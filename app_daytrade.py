@@ -842,22 +842,22 @@ def trading_window_shapes(df: pd.DataFrame):
 
 
 def _dashboard_header():
-    """Title + Analytics hint. No st.page_link or any link to Analytics here.
+    """Title + Backtests hint. No st.page_link or any link to Backtests here.
     The top-bar 'Analytics' on Streamlit Cloud is Streamlit's own UI and causes 404; navigate via sidebar only."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
     with st.sidebar:
-        st.caption("📊 **Strategy Analytics:** click **Analytics** in the list below for backtests & charts.")
+        st.caption("📊 **Backtests & charts:** click **Backtests** in the sidebar list.")
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
         st.title("SPX Day Trading Dashboard")
         st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.caption("📊 **Strategy Analytics** (backtests): open the **sidebar** (←) and click **Analytics** in the list.")
+        st.caption("📊 **Backtests** (backtests & charts): open the **sidebar** (←) and click **Backtests** in the list.")
     st.markdown(
         '<div style="background: rgba(255, 152, 0, 0.2); border: 1px solid #ff9800; border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">'
-        '<strong>📊 Strategy Analytics (backtests & charts):</strong> Open the <strong>sidebar</strong> (click <strong>▶</strong> or the arrow on the <strong>left edge</strong> if it\'s closed), then click <strong>Analytics</strong> in the list. '
-        '<span style="color: #ff9800;">Do not click "Analytics" in the top bar — that is Streamlit\'s and will show an error.</span></div>',
+        '<strong>📊 Backtests & charts:</strong> Open the <strong>sidebar</strong> (click <strong>▶</strong> or the arrow on the <strong>left edge</strong> if it\'s closed), then click <strong>Backtests</strong> in the list. '
+        '<span style="color: #ff9800;">Do not click "Analytics" in the top bar — click Backtests in the sidebar instead.</span></div>',
         unsafe_allow_html=True,
     )
 

@@ -1,12 +1,12 @@
 """
-Analytics — Upload SPX CSV, select interval and strategies, run backtests and view win rate + charts.
+Backtests — Upload SPX CSV, select interval and strategies, run backtests and view win rate + charts.
 """
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="Analytics | SPX", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Backtests", page_icon="📈", layout="wide")
 
 # ---------- Cost model (industry standard) ----------
 SPREAD_PCT = 0.0001      # 1bp each side (bid-ask spread)
@@ -814,7 +814,7 @@ if st.button("← Back to Dashboard", type="secondary", key="analytics_back_dash
     st.switch_page("app_daytrade.py")
 
 # Section 1 — Page header (title + subtitle; info bar after load)
-st.markdown('<p class="analytics-header">Strategy Analytics</p>', unsafe_allow_html=True)
+st.markdown('<p class="analytics-header">Backtests</p>', unsafe_allow_html=True)
 st.markdown('<p class="analytics-subtitle">Backtest your SPX intraday strategies with institutional-grade metrics</p>', unsafe_allow_html=True)
 
 # File upload (Step 1)
@@ -1201,6 +1201,6 @@ st.markdown("""
 <div class="analytics-footer">
   All returns simulated as SPX index % return. Entry at next bar open. Costs include spread, slippage, SEC fee.<br>
   <em>Not financial advice. For educational and research purposes only.</em><br>
-  <span style="color: #2d3142;">SPX Strategy Analytics v1.0</span>
+  <span style="color: #2d3142;">SPX Backtests v1.0</span>
 </div>
 """, unsafe_allow_html=True)
