@@ -121,7 +121,7 @@ CONDITION_LABELS = [
 BUY_LABELS = [
     "Price above VWAP",
     "RSI < 45 (oversold)",
-    "EMA 9 crossed above EMA 21",
+    "EMA 9 above EMA 21",
     "MACD above signal line",
     "VIX < 25 (calm market)",
     "AAPL green today",
@@ -131,7 +131,7 @@ BUY_LABELS = [
 SELL_LABELS = [
     "Price below VWAP",
     "RSI > 55 (overbought)",
-    "EMA 9 crossed below EMA 21",
+    "EMA 9 below EMA 21",
     "MACD below signal line",
     "VIX ≥ 22 (elevated fear)",
     "AAPL red today",
@@ -689,9 +689,13 @@ def get_signal_strength_conditions(df_spx: pd.DataFrame, vix_value: float, data:
     if rsi_val is not None:
         buy_bools[1] = bool(rsi_val < BUY_RSI_MAX)
         sell_bools[1] = bool(rsi_val > SELL_RSI_MIN)
-    # 3. EMA 9 crossed EMA 21 on current bar (for score only)
-    buy_bools[2] = bool(_ema_cross_above(df_spx, i))
-    sell_bools[2] = bool(_ema_cross_below(df_spx, i))
+    # 3. EMA 9 above/below EMA 21 (sustained on current bar)
+    if "EMA9" in df_spx.columns and "EMA21" in df_spx.columns:
+        ema9_i = df_spx["EMA9"].iloc[i]
+        ema21_i = df_spx["EMA21"].iloc[i]
+        if pd.notna(ema9_i) and pd.notna(ema21_i):
+            buy_bools[2] = bool(float(ema9_i) > float(ema21_i))
+            sell_bools[2] = bool(float(ema9_i) < float(ema21_i))
     # 4. MACD above/below signal (sustained, not just cross)
     mc, sc = _macd_signal_cols(df_spx)
     if mc and sc:
