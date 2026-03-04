@@ -841,17 +841,25 @@ def trading_window_shapes(df: pd.DataFrame):
     return shapes
 
 
-def run_dashboard():
+def _dashboard_header():
+    """Title + Analytics link. Rendered in main script so st.page_link works on Streamlit Cloud (fragments lack full page registry)."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
         st.title("SPX Day Trading Dashboard")
         st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
-        st.markdown("<br>", unsafe_allow_html=True)  # align with title
-        # Use page_link so navigation works inside @st.fragment (switch_page is not allowed in fragments on Streamlit Cloud)
+        st.markdown("<br>", unsafe_allow_html=True)
         st.page_link("pages/Analytics.py", label="Analytics", icon="📊")
 
+
+def run_dashboard():
+    _dashboard_header()
+    _run_dashboard_body()
+
+
+def _run_dashboard_body():
+    """Dashboard content (metrics, panels, charts). Can run inside @st.fragment for auto-refresh."""
     is_market_open, show_date, data_label = _market_open_and_display_date()
     show_date_str = show_date.isoformat() if hasattr(show_date, "isoformat") else str(show_date)
     today_et = datetime.now(EST).date()
@@ -1379,9 +1387,10 @@ except Exception:
 
 if run_every_available:
     try:
+        _dashboard_header()
         @st.fragment(run_every=timedelta(seconds=300))
         def _auto_refresh():
-            run_dashboard()
+            _run_dashboard_body()
         _auto_refresh()
     except Exception:
         run_dashboard()
