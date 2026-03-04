@@ -6,6 +6,9 @@
 # Dashboard persisted settings (local checkbox state)
 .dashboard_conditions.json
 
+# Backtests page cache (loaded CSV persists across refresh)
+.backtests_cache/
+
 # Python
 __pycache__/
 *.py[cod]

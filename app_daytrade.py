@@ -888,13 +888,16 @@ def _run_dashboard_body():
         st.warning("Not enough SPX 5-minute data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
         return
     spx = add_indicators(spx)
-    # Load condition checkboxes from file once (persist across refreshes)
-    if "dashboard_conditions_loaded" not in st.session_state:
+    # Rehydrate condition checkboxes from file when any key is missing (e.g. after navigating back from another page)
+    need_load = any(
+        "buy_enabled_%d" % j not in st.session_state or "sell_enabled_%d" % j not in st.session_state
+        for j in range(8)
+    )
+    if need_load:
         eb, es = _load_condition_flags()
         for j in range(8):
             st.session_state["buy_enabled_%d" % j] = eb[j]
             st.session_state["sell_enabled_%d" % j] = es[j]
-        st.session_state.dashboard_conditions_loaded = True
     enabled_buy = [st.session_state.get("buy_enabled_%d" % j, True) for j in range(8)]
     enabled_sell = [st.session_state.get("sell_enabled_%d" % j, True) for j in range(8)]
     signal, signal_debug = get_signal(spx, vix_value, data, enabled_buy, enabled_sell)

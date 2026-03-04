@@ -1,6 +1,8 @@
 """
 Backtests — Upload SPX CSV, select interval and strategies, run backtests and view win rate + charts.
 """
+import json
+import os
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
@@ -13,6 +15,49 @@ SPREAD_PCT = 0.0001      # 1bp each side (bid-ask spread)
 SLIPPAGE_PCT = 0.0001    # 1bp each side (execution slippage)
 SEC_FEE_RATE = 0.0000278 # on sell side only (per $ of trade value)
 COMMISSION = 0.0         # $0 (zero commission broker)
+
+# Persist loaded CSV to disk so it survives browser refresh
+_BACKTESTS_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".backtests_cache")
+_BACKTESTS_DATA_PATH = os.path.join(_BACKTESTS_CACHE_DIR, "data.parquet")
+_BACKTESTS_META_PATH = os.path.join(_BACKTESTS_CACHE_DIR, "meta.json")
+
+
+def _load_backtests_cache():
+    """Load DataFrame and filename from disk cache. Returns (df, filename) or (None, None)."""
+    try:
+        if not os.path.isfile(_BACKTESTS_DATA_PATH) or not os.path.isfile(_BACKTESTS_META_PATH):
+            return None, None
+        with open(_BACKTESTS_META_PATH, "r") as f:
+            meta = json.load(f)
+        filename = meta.get("filename", "saved.csv")
+        df = pd.read_parquet(_BACKTESTS_DATA_PATH)
+        if df is None or df.empty or len(df) < 30:
+            return None, None
+        return df, filename
+    except Exception:
+        return None, None
+
+
+def _save_backtests_cache(df: pd.DataFrame, filename: str) -> None:
+    """Save DataFrame and filename to disk so they persist across refresh."""
+    try:
+        os.makedirs(_BACKTESTS_CACHE_DIR, exist_ok=True)
+        df.to_parquet(_BACKTESTS_DATA_PATH, index=True)
+        with open(_BACKTESTS_META_PATH, "w") as f:
+            json.dump({"filename": filename}, f)
+    except Exception:
+        pass
+
+
+def _clear_backtests_cache() -> None:
+    """Remove disk cache (used when user clicks Clear)."""
+    try:
+        if os.path.isfile(_BACKTESTS_DATA_PATH):
+            os.remove(_BACKTESTS_DATA_PATH)
+        if os.path.isfile(_BACKTESTS_META_PATH):
+            os.remove(_BACKTESTS_META_PATH)
+    except Exception:
+        pass
 
 
 def _cost_per_round_trip(entry_price: float, exit_price: float, notional: float = None) -> float:
@@ -817,57 +862,86 @@ if st.button("← Back to Dashboard", type="secondary", key="analytics_back_dash
 st.markdown('<p class="analytics-header">Backtests</p>', unsafe_allow_html=True)
 st.markdown('<p class="analytics-subtitle">Backtest your SPX intraday strategies with institutional-grade metrics</p>', unsafe_allow_html=True)
 
-# File upload (Step 1)
-uploaded = st.file_uploader("Select SPX data file (CSV)", type=["csv"], help="e.g. spx_5m_60d.csv with columns: Datetime, Open, High, Low, Close, Volume")
-if not uploaded:
-    st.info("👆 Upload a CSV file to begin. Use the file from `fetch_spx_1y.py` (e.g. spx_5m_60d.csv) or any OHLCV CSV with a datetime column.")
-    st.stop()
+# File upload (Step 1) — persist in session_state and on disk so data survives navigation and refresh
+df = None
+file_name = None
 
-# Parse CSV — defensive: read by column NAME only, never by position
-try:
-    raw = pd.read_csv(uploaded)
-    # Normalize column names (strip spaces, fix case)
-    raw.columns = [c.strip().title() for c in raw.columns]
-    # Handle 'Adj Close' → 'Close'
-    if "Adj Close" in raw.columns and "Close" not in raw.columns:
-        raw.rename(columns={"Adj Close": "Close"}, inplace=True)
-    # Verify required columns exist
-    required = ["Open", "High", "Low", "Close"]
-    missing = [c for c in required if c not in raw.columns]
-    if missing:
-        st.error(f"❌ CSV missing required columns: {missing}. Found: {list(raw.columns)}")
+# Restore from session_state or from disk cache (survives refresh)
+if "backtests_df" in st.session_state and st.session_state.backtests_df is not None:
+    df = st.session_state.backtests_df
+    file_name = st.session_state.get("backtests_filename", "saved.csv")
+else:
+    cached_df, cached_name = _load_backtests_cache()
+    if cached_df is not None and cached_name:
+        st.session_state.backtests_df = cached_df
+        st.session_state.backtests_filename = cached_name
+        df = cached_df
+        file_name = cached_name
+
+if df is not None:
+    st.success(f"📂 Using previously loaded file: **{file_name}** — your data is preserved when you navigate or refresh.")
+    if st.button("Clear and upload new file", key="backtests_clear_file"):
+        del st.session_state.backtests_df
+        if "backtests_filename" in st.session_state:
+            del st.session_state.backtests_filename
+        _clear_backtests_cache()
+        st.rerun()
+else:
+    uploaded = st.file_uploader("Select SPX data file (CSV)", type=["csv"], key="backtests_file_uploader", help="e.g. spx_5m_60d.csv with columns: Datetime, Open, High, Low, Close, Volume")
+    if not uploaded:
+        st.info("👆 Upload a CSV file to begin. Use the file from `fetch_spx_1y.py` (e.g. spx_5m_60d.csv) or any OHLCV CSV with a datetime column.")
         st.stop()
-    # Volume required for backtest (VWAP, etc.)
-    if "Volume" not in raw.columns:
-        st.error(f"❌ CSV missing column: Volume. Found: {list(raw.columns)}")
+
+    # Parse CSV — defensive: read by column NAME only, never by position
+    try:
+        raw = pd.read_csv(uploaded)
+        # Normalize column names (strip spaces, fix case)
+        raw.columns = [c.strip().title() for c in raw.columns]
+        # Handle 'Adj Close' → 'Close'
+        if "Adj Close" in raw.columns and "Close" not in raw.columns:
+            raw.rename(columns={"Adj Close": "Close"}, inplace=True)
+        # Verify required columns exist
+        required = ["Open", "High", "Low", "Close"]
+        missing = [c for c in required if c not in raw.columns]
+        if missing:
+            st.error(f"❌ CSV missing required columns: {missing}. Found: {list(raw.columns)}")
+            st.stop()
+        # Volume required for backtest (VWAP, etc.)
+        if "Volume" not in raw.columns:
+            st.error(f"❌ CSV missing column: Volume. Found: {list(raw.columns)}")
+            st.stop()
+        # Find datetime column by name (never by position)
+        date_col = None
+        for c in ["Datetime", "DateTime", "Date", "Time"]:
+            if c in raw.columns:
+                date_col = c
+                break
+        if date_col is None:
+            st.error(f"❌ CSV missing datetime column. Expected one of: Datetime, DateTime, Date, Time. Found: {list(raw.columns)}")
+            st.stop()
+        raw[date_col] = pd.to_datetime(raw[date_col], utc=True, errors="coerce")
+        raw = raw.dropna(subset=[date_col])
+        raw = raw.set_index(date_col)
+        raw.index.name = "Datetime"
+        # Always assign by name — NEVER use iloc for column selection
+        df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+        df = df.sort_index()
+        if len(df) < 30:
+            st.warning("Not enough rows (need at least 30). Try a larger file.")
+            st.stop()
+        # Persist in session_state and on disk so data survives navigation and browser refresh
+        file_name = getattr(uploaded, "name", "uploaded.csv")
+        st.session_state.backtests_df = df
+        st.session_state.backtests_filename = file_name
+        _save_backtests_cache(df, file_name)
+        # Data Quality panel — show detected columns and confirm read-by-name
+        detected = " | ".join([str(raw.index.name)] + list(df.columns))
+        with st.expander("📋 Data Quality", expanded=True):
+            st.markdown(f"**Detected columns:** {detected}")
+            st.success("✅ All required columns found (reading by name, order doesn't matter).")
+    except Exception as e:
+        st.error(f"Could not load CSV: {e}")
         st.stop()
-    # Find datetime column by name (never by position)
-    date_col = None
-    for c in ["Datetime", "DateTime", "Date", "Time"]:
-        if c in raw.columns:
-            date_col = c
-            break
-    if date_col is None:
-        st.error(f"❌ CSV missing datetime column. Expected one of: Datetime, DateTime, Date, Time. Found: {list(raw.columns)}")
-        st.stop()
-    raw[date_col] = pd.to_datetime(raw[date_col], utc=True, errors="coerce")
-    raw = raw.dropna(subset=[date_col])
-    raw = raw.set_index(date_col)
-    raw.index.name = "Datetime"
-    # Always assign by name — NEVER use iloc for column selection
-    df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-    df = df.sort_index()
-    if len(df) < 30:
-        st.warning("Not enough rows (need at least 30). Try a larger file.")
-        st.stop()
-    # Data Quality panel — show detected columns and confirm read-by-name
-    detected = " | ".join([str(raw.index.name)] + list(df.columns))
-    with st.expander("📋 Data Quality", expanded=True):
-        st.markdown(f"**Detected columns:** {detected}")
-        st.success("✅ All required columns found (reading by name, order doesn't matter).")
-except Exception as e:
-    st.error(f"Could not load CSV: {e}")
-    st.stop()
 
 # Section 2 — Config sidebar
 with st.sidebar:
@@ -919,7 +993,7 @@ with st.sidebar:
 # Info bar (Section 1 continued — after sidebar so we have interval)
 date_min = df.index.min()
 date_max = df.index.max()
-file_name = getattr(uploaded, "name", "uploaded.csv")
+# file_name already set above (from session_state when using stored df, or from upload when parsing)
 st.markdown(f'''
 <div class="analytics-info-bar">
   <span class="analytics-info-item">📅 <strong>Date range</strong> {date_min.strftime("%Y-%m-%d") if hasattr(date_min, "strftime") else date_min} → {date_max.strftime("%Y-%m-%d") if hasattr(date_max, "strftime") else date_max}</span>
