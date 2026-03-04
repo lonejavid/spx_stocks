@@ -854,13 +854,6 @@ def _dashboard_header():
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("📊 **Backtests** (backtests & charts): open the **sidebar** (←) and click **Backtests** in the list.")
-    st.markdown(
-        '<div style="background: rgba(255, 152, 0, 0.2); border: 1px solid #ff9800; border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">'
-        '<strong>📊 Backtests & charts:</strong> Open the <strong>sidebar</strong> (click <strong>▶</strong> or the arrow on the <strong>left edge</strong> if it\'s closed), then click <strong>Backtests</strong> in the list. '
-        '<span style="color: #ff9800;">Do not click "Analytics" in the top bar — click Backtests in the sidebar instead.</span></div>',
-        unsafe_allow_html=True,
-    )
-
 
 
 def run_dashboard():
