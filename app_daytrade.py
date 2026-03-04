@@ -842,7 +842,8 @@ def trading_window_shapes(df: pd.DataFrame):
 
 
 def _dashboard_header():
-    """Title + Analytics hint. Sidebar is expanded so Streamlit's built-in 'Analytics' link is visible and works on Cloud."""
+    """Title + Analytics hint. No st.page_link or any link to Analytics here.
+    The top-bar 'Analytics' on Streamlit Cloud is Streamlit's own UI and causes 404; navigate via sidebar only."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
     with st.sidebar:
         st.caption("📊 **Strategy Analytics:** click **Analytics** in the list below for backtests & charts.")
@@ -853,7 +854,13 @@ def _dashboard_header():
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("📊 **Strategy Analytics** (backtests): open the **sidebar** (←) and click **Analytics** in the list.")
-        st.caption("_Not the 'Analytics' in the browser bar — that’s Streamlit’s app stats._")
+    st.markdown(
+        '<div style="background: rgba(255, 152, 0, 0.2); border: 1px solid #ff9800; border-radius: 8px; padding: 10px 14px; margin-bottom: 1rem;">'
+        '<strong>📊 Strategy Analytics (backtests & charts):</strong> Open the <strong>sidebar</strong> (click <strong>▶</strong> or the arrow on the <strong>left edge</strong> if it\'s closed), then click <strong>Analytics</strong> in the list. '
+        '<span style="color: #ff9800;">Do not click "Analytics" in the top bar — that is Streamlit\'s and will show an error.</span></div>',
+        unsafe_allow_html=True,
+    )
+
 
 
 def run_dashboard():
