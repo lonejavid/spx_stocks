@@ -842,7 +842,7 @@ def trading_window_shapes(df: pd.DataFrame):
 
 
 def _dashboard_header():
-    """Title + Analytics link. Rendered in main script so st.page_link works on Streamlit Cloud (fragments lack full page registry)."""
+    """Title + Analytics link. Use markdown link to avoid st.page_link KeyError on Streamlit Cloud (page registry differs there)."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
@@ -850,7 +850,11 @@ def _dashboard_header():
         st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.page_link("pages/Analytics.py", label="Analytics", icon="📊")
+        # Direct link to Analytics page (st.page_link raises KeyError on Streamlit Cloud)
+        st.markdown(
+            '<a href="/Analytics" target="_self" style="display:inline-block;padding:0.5rem 1rem;background:#31333f;color:#f0f2f6;border-radius:6px;text-decoration:none;font-size:0.9rem;border:1px solid #555;">📊 Analytics</a>',
+            unsafe_allow_html=True,
+        )
 
 
 def run_dashboard():
