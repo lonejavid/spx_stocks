@@ -28,7 +28,7 @@ try:
 except ImportError:
     HAS_PANDAS_TA = False
 
-st.set_page_config(page_title="SPX Day Trading", page_icon="📊", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="SPX Day Trading", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 # Theme + responsive (mobile & web)
 DARK_CSS = """
@@ -842,16 +842,17 @@ def trading_window_shapes(df: pd.DataFrame):
 
 
 def _dashboard_header():
-    """Title + Analytics button. Use switch_page so navigation works on Streamlit Cloud (header runs in main script, not in fragment)."""
+    """Title + Analytics hint. Sidebar is expanded so Streamlit's built-in 'Analytics' link is visible and works on Cloud."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
+    with st.sidebar:
+        st.caption("📊 **Strategy Analytics:** click **Analytics** in the list below for backtests & charts.")
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
         st.title("SPX Day Trading Dashboard")
         st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("📊 Analytics", type="secondary", use_container_width=True, key="nav_analytics_header"):
-            st.switch_page("pages/Analytics.py")
+        st.caption("📊 Open **Analytics** via the **sidebar** (←)")
 
 
 def run_dashboard():
