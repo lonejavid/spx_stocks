@@ -219,16 +219,17 @@ SLACK_WEBHOOK_URL = _get_slack_webhook_url()
 SLACK_COOLDOWN_MINUTES = 30
 
 
-def send_slack_alert(message: str) -> None:
-    """Send a POST request to the Slack webhook. All errors handled silently."""
+def send_slack_alert(message: str) -> bool:
+    """Send a POST request to the Slack webhook. Returns True if sent, False if skipped or failed."""
     if not message or not SLACK_WEBHOOK_URL.strip():
-        return
+        return False
     try:
         body = json.dumps({"text": message}).encode("utf-8")
         req = Request(SLACK_WEBHOOK_URL, data=body, method="POST", headers={"Content-Type": "application/json"})
         urlopen(req, timeout=10)
+        return True
     except (URLError, HTTPError, OSError, ValueError, Exception):
-        pass
+        return False
 
 
 def _should_send_signal_alert(signal_type: str) -> bool:
@@ -598,12 +599,10 @@ def get_signal(df_spx: pd.DataFrame, vix_value: float, data: dict = None, enable
     aapl_green, msft_green, qqq_above_vwap = _get_confirmation_bools(data)
     price_above_vwap = (vwap is not None and not pd.isna(vwap) and float(close) > float(vwap))
     price_below_vwap = (vwap is not None and not pd.isna(vwap) and float(close) < float(vwap))
-    ema_cross_above = _ema_cross_above(df_spx, i)
-    ema_cross_below = _ema_cross_below(df_spx, i)
 
-    # Per-condition bools: BUY [0]=VWAP, [1]=RSI, [2]=EMA cross, [3]=MACD, [4]=VIX, [5]=AAPL, [6]=MSFT, [7]=QQQ
-    buy_bools = [price_above_vwap, rsi_ok_buy, ema_cross_above, macd_above, vix_ok_buy, aapl_green, msft_green, qqq_above_vwap]
-    sell_bools = [price_below_vwap, rsi_ok_sell, ema_cross_below, macd_below, vix_ok_sell, not aapl_green, not msft_green, not qqq_above_vwap]
+    # Per-condition bools: BUY [0]=VWAP, [1]=RSI, [2]=EMA above/below (sustained), [3]=MACD, [4]=VIX, [5]=AAPL, [6]=MSFT, [7]=QQQ
+    buy_bools = [price_above_vwap, rsi_ok_buy, ema_ok_buy, macd_above, vix_ok_buy, aapl_green, msft_green, qqq_above_vwap]
+    sell_bools = [price_below_vwap, rsi_ok_sell, ema_ok_sell, macd_below, vix_ok_sell, not aapl_green, not msft_green, not qqq_above_vwap]
 
     n_buy_enabled = sum(enabled_buy)
     n_sell_enabled = sum(enabled_sell)
@@ -1120,7 +1119,8 @@ def _run_dashboard_body():
             st.write(f"**ema_ok:** {d.get('ema_ok', '—')} (BUY: EMA9>EMA21; SELL: EMA9<EMA21)")
             st.caption("Signal is determined only by these 4 core conditions + confirmations; the 6/8 score is for display only.")
 
-    # Slack: automatic alert for BUY/SELL/STRONG BUY/STRONG SELL (30 min cooldown per base type)
+    # Slack: send notification once when the selected (enabled) BUY or SELL strategy is met
+    # Signal is already computed from enabled_buy/enabled_sell in get_signal(); BUY/SELL/STRONG = strategy met
     base_type = _signal_base_type(signal)
     if signal in ("BUY", "SELL", "STRONG BUY", "STRONG SELL") and base_type and _should_send_signal_alert(base_type):
         try:
@@ -1128,6 +1128,7 @@ def _run_dashboard_body():
             r_str = f"{rsi_val:.1f}" if rsi_val is not None else "—"
             v_str = f"{vix_value:.1f}" if vix_value is not None else "—"
             time_short = datetime.now(EST).strftime("%I:%M %p ET").lstrip("0")
+            # Only list conditions that are both enabled (selected) and currently met
             conditions_met = [CONDITION_LABELS[k] for k in range(8) if (enabled_buy[k] or enabled_sell[k]) and (buy_bools[k] or sell_bools[k])]
             cond_str = ", ".join(conditions_met) if conditions_met else "—"
             mc, sc = _macd_signal_cols(spx)
@@ -1136,15 +1137,15 @@ def _run_dashboard_body():
             msg = (
                 f"{emoji} *{signal} — SPX Day Trading*\n"
                 f"💰 *SPX Price:* ${spx_p:,.2f}\n"
-                f"📊 *Signal Score:* {display_score}/{display_score_denom}\n"
+                f"📊 *Selected conditions met:* {display_score}/{display_score_denom}\n"
                 f"⏰ *Time:* {time_short}\n"
                 f"📈 *RSI:* {r_str} | *VIX:* {v_str}\n"
                 f"📉 *MACD:* {macd_status}\n"
                 f"✅ Conditions met: {cond_str}\n"
                 f"⚠️ Not financial advice."
             )
-            send_slack_alert(msg)
-            _record_signal_sent(base_type)
+            if send_slack_alert(msg):
+                _record_signal_sent(base_type)
         except Exception:
             pass
 
