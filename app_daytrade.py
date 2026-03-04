@@ -1277,50 +1277,63 @@ def _run_dashboard_body():
 
     st.markdown("---")
 
-    # SPX intraday: clean line chart only (9:30 AM–4:00 PM ET data)
+    # Which indicator charts to show: only for conditions the user has selected (checked)
+    show_vwap = enabled_buy[0] or enabled_sell[0]   # Price above/below VWAP
+    show_rsi = enabled_buy[1] or enabled_sell[1]   # RSI zone
+    show_ema = enabled_buy[2] or enabled_sell[2]   # EMA 9 crossed EMA 21
+    show_macd = enabled_buy[3] or enabled_sell[3]  # MACD above/below signal
+
+    # SPX intraday: price chart — always Close; VWAP and EMAs only if that indicator is selected
     chart_spx = spx[~spx.index.duplicated(keep="first")].sort_index()
-    st.subheader("SPX 5-min price & VWAP")
-    chart_title = f"SPX 5-min with VWAP & EMAs — {data_label} (9:30 AM–4:00 PM ET only)"
+    title_parts = ["SPX 5-min"]
+    if show_vwap:
+        title_parts.append("VWAP")
+    if show_ema:
+        title_parts.append("EMAs")
+    chart_title = f"{' & '.join(title_parts)} — {data_label} (9:30 AM–4:00 PM ET only)"
+    st.subheader("SPX 5-min price" + (" & VWAP" if show_vwap else "") + (" & EMA 9/21" if show_ema else ""))
     fig_price = go.Figure()
     fig_price.add_trace(go.Scatter(
         x=chart_spx.index, y=chart_spx["Close"], name="SPX",
         mode="lines", line=dict(color="#00d4aa", width=2),
     ))
-    if "VWAP" in chart_spx.columns:
+    if show_vwap and "VWAP" in chart_spx.columns:
         fig_price.add_trace(go.Scatter(x=chart_spx.index, y=chart_spx["VWAP"], name="VWAP", mode="lines", line=dict(color="#f39c12", width=1.5, dash="dash")))
-    if "EMA9" in chart_spx.columns:
+    if show_ema and "EMA9" in chart_spx.columns:
         fig_price.add_trace(go.Scatter(x=chart_spx.index, y=chart_spx["EMA9"], name="EMA 9", mode="lines", line=dict(color="#9b59b6", width=1.2)))
-    if "EMA21" in chart_spx.columns:
+    if show_ema and "EMA21" in chart_spx.columns:
         fig_price.add_trace(go.Scatter(x=chart_spx.index, y=chart_spx["EMA21"], name="EMA 21", mode="lines", line=dict(color="#3498db", width=1.2)))
     fig_price.update_layout(**PLOTLY_LAYOUT, title=chart_title, height=380, xaxis=AXIS, yaxis=AXIS)
     for s in trading_window_shapes(chart_spx):
         fig_price.add_shape(s)
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # RSI (mini chart with BUY zone 45 / SELL zone 55)
-    st.subheader("RSI (14)")
-    rsi_col = "RSI" if "RSI" in spx.columns else None
-    if rsi_col:
-        fig_rsi = go.Figure()
-        fig_rsi.add_trace(go.Scatter(x=spx.index, y=spx[rsi_col], name="RSI", line=dict(color="#00d4aa", width=2)))
-        fig_rsi.add_hline(y=BUY_RSI_MAX, line_dash="dash", line_color="#2ecc71", annotation_text="45 (buy zone)")
-        fig_rsi.add_hline(y=SELL_RSI_MIN, line_dash="dash", line_color="#e74c3c", annotation_text="55 (sell zone)")
-        fig_rsi.update_layout(**PLOTLY_LAYOUT, title="RSI (14)", height=280, xaxis=AXIS, yaxis=dict(**AXIS, range=[0, 100]))
-        st.plotly_chart(fig_rsi, use_container_width=True)
+    # RSI chart — only if RSI condition is selected
+    if show_rsi:
+        st.subheader("RSI (14)")
+        rsi_col = "RSI" if "RSI" in spx.columns else None
+        if rsi_col:
+            fig_rsi = go.Figure()
+            fig_rsi.add_trace(go.Scatter(x=spx.index, y=spx[rsi_col], name="RSI", line=dict(color="#00d4aa", width=2)))
+            fig_rsi.add_hline(y=BUY_RSI_MAX, line_dash="dash", line_color="#2ecc71", annotation_text="45 (buy zone)")
+            fig_rsi.add_hline(y=SELL_RSI_MIN, line_dash="dash", line_color="#e74c3c", annotation_text="55 (sell zone)")
+            fig_rsi.update_layout(**PLOTLY_LAYOUT, title="RSI (14)", height=280, xaxis=AXIS, yaxis=dict(**AXIS, range=[0, 100]))
+            st.plotly_chart(fig_rsi, use_container_width=True)
 
-    # MACD
-    mc, sc = _macd_signal_cols(spx)
-    hist_col = [c for c in spx.columns if "MACDh" in str(c) or (isinstance(c, str) and "MACD" in c and "hist" in c.lower())][:1]
-    if mc and sc:
-        st.subheader("MACD (12, 26, 9)")
-        fig_macd = go.Figure()
-        fig_macd.add_trace(go.Scatter(x=spx.index, y=spx[mc], name="MACD", line=dict(color="#00d4aa", width=2)))
-        fig_macd.add_trace(go.Scatter(x=spx.index, y=spx[sc], name="Signal", line=dict(color="#f39c12", width=1.5)))
-        if hist_col:
-            colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in spx[hist_col[0]]]
-            fig_macd.add_trace(go.Bar(x=spx.index, y=spx[hist_col[0]], name="Histogram", marker_color=colors, opacity=0.6))
-        fig_macd.update_layout(**PLOTLY_LAYOUT, title="MACD (12, 26, 9)", height=280, xaxis=AXIS, yaxis=AXIS)
-        st.plotly_chart(fig_macd, use_container_width=True)
+    # MACD chart — only if MACD condition is selected
+    if show_macd:
+        mc, sc = _macd_signal_cols(spx)
+        hist_col = [c for c in spx.columns if "MACDh" in str(c) or (isinstance(c, str) and "MACD" in c and "hist" in c.lower())][:1]
+        if mc and sc:
+            st.subheader("MACD (12, 26, 9)")
+            fig_macd = go.Figure()
+            fig_macd.add_trace(go.Scatter(x=spx.index, y=spx[mc], name="MACD", line=dict(color="#00d4aa", width=2)))
+            fig_macd.add_trace(go.Scatter(x=spx.index, y=spx[sc], name="Signal", line=dict(color="#f39c12", width=1.5)))
+            if hist_col:
+                colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in spx[hist_col[0]]]
+                fig_macd.add_trace(go.Bar(x=spx.index, y=spx[hist_col[0]], name="Histogram", marker_color=colors, opacity=0.6))
+            fig_macd.update_layout(**PLOTLY_LAYOUT, title="MACD (12, 26, 9)", height=280, xaxis=AXIS, yaxis=AXIS)
+            st.plotly_chart(fig_macd, use_container_width=True)
 
     # Backtesting section (3 strategies on 1 year SPX daily)
     st.markdown("---")
