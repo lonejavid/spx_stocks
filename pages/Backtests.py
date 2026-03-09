@@ -1,5 +1,5 @@
 """
-Backtests — Upload SPX CSV, select interval and strategies, run backtests and view win rate + charts.
+Backtests — Upload SPX CSV, select date and amount, run one backtest to get all strategies (RSI, MACD, EMA, and combinations). Results sorted by return (best first).
 """
 import json
 import os
@@ -131,8 +131,8 @@ def _record_trade(d: pd.DataFrame, entry_idx: int, exit_idx: int, entry_price: f
     }
 
 
-def _backtest_rsi(df: pd.DataFrame, notional: float = None) -> tuple:
-    """Entry: RSI < 30. Exit: RSI crosses above 50, or RSI > 70, or EOD (force close at last bar Close). Entry/exit prices: next bar Open; last bar uses Close. RSI EWM valid from bar 1."""
+def _backtest_rsi(df: pd.DataFrame, notional: float = None, rsi_low: float = 30, rsi_high: float = 70) -> tuple:
+    """Entry: RSI < rsi_low. Exit: RSI crosses above 50, or RSI > rsi_high, or EOD. Entry/exit prices: next bar Open; last bar uses Close."""
     d = df.copy()
     if "Open" not in d.columns:
         d["Open"] = d["Close"]
@@ -146,9 +146,9 @@ def _backtest_rsi(df: pd.DataFrame, notional: float = None) -> tuple:
         r = d["RSI"].iloc[i]
         r_prev = d["RSI"].iloc[i - 1] if i > 0 else 50
         is_last_bar = i == n - 1
-        # Exit conditions (whichever first): RSI cross above 50, RSI > 70, or EOD
+        # Exit conditions (whichever first): RSI cross above 50, RSI > rsi_high, or EOD
         exit_cross_50 = pos is not None and r_prev < 50 and r >= 50
-        exit_overbought = pos is not None and r > 70
+        exit_overbought = pos is not None and r > rsi_high
         exit_eod = pos is not None and is_last_bar
         if exit_eod:
             exit_px = float(d["Close"].iloc[i])
@@ -166,15 +166,15 @@ def _backtest_rsi(df: pd.DataFrame, notional: float = None) -> tuple:
                 t = _record_trade(d, entry_idx, i, entry_price, exit_px, force_closed=True, notional=notional)
                 trades.append(t)
             pos = None
-        # Entry: RSI < 30; enter at next bar's open
-        if pos is None and r < 30:
+        # Entry: RSI < rsi_low; enter at next bar's open
+        if pos is None and r < rsi_low:
             k = i + 1
             if k < n:
                 pos = "long"
                 entry_price = float(d["Open"].iloc[k])
                 entry_idx = k
-            # If k == n we don't enter (no next bar)
-    metrics = _result_metrics(trades, "RSI (buy <30, exit at 50/70/EOD)")
+    label = f"RSI (buy <{int(rsi_low)}, exit at 50/{int(rsi_high)}/EOD)"
+    metrics = _result_metrics(trades, label)
     return metrics, trades, d
 
 
@@ -258,12 +258,12 @@ def _backtest_ema(df: pd.DataFrame, notional: float = None) -> tuple:
 COMBINED_OPTION_LABEL = "Combined (all selected must agree)"
 
 
-def _run_combined_strategy(df: pd.DataFrame, selected_strategies: list, notional: float = None) -> tuple:
+def _run_combined_strategy(df: pd.DataFrame, selected_strategies: list, notional: float = None, rsi_low: float = 30, rsi_high: float = 70) -> tuple:
     """
     Combined signal: +1 only when ALL selected strategies agree LONG, -1 only when ALL agree SHORT, else 0.
     Entry at Open[i+1], exit at Open[i+1] when consensus breaks. Force close at last bar Close.
     Returns (metrics, trades, df_plot, signal_table_df).
-    selected_strategies: list of display names e.g. ["MACD crossover", "EMA 9/21 crossover", "RSI (buy <30, exit at 50/70/EOD)"]
+    selected_strategies: list of display names; RSI is detected by name.startswith("RSI (").
     """
     d = df.copy()
     if "Open" not in d.columns:
@@ -279,7 +279,7 @@ def _run_combined_strategy(df: pd.DataFrame, selected_strategies: list, notional
     # Bar-by-bar signals: +1 long, -1 short, 0 flat
     has_macd = "MACD crossover" in selected_strategies
     has_ema = "EMA 9/21 crossover" in selected_strategies
-    has_rsi = "RSI (buy <30, exit at 50/70/EOD)" in selected_strategies
+    has_rsi = any(s.startswith("RSI (") for s in selected_strategies)
     sig_macd = []
     sig_ema = []
     sig_rsi = []
@@ -303,9 +303,9 @@ def _run_combined_strategy(df: pd.DataFrame, selected_strategies: list, notional
         rsi_v = 0
         if has_rsi and i >= 14:
             r = d["RSI"].iloc[i]
-            if r < 30 or (pos and r < 50):
+            if r < rsi_low or (pos and r < 50):
                 rsi_v = 1
-            elif r > 70:
+            elif r > rsi_high:
                 rsi_v = -1
         sig_rsi.append(rsi_v)
         # Combined: only +1 if all selected == +1, only -1 if all == -1
@@ -963,14 +963,11 @@ with st.sidebar:
         df_run = df
         n_match = len(df_run)
         st.caption("All bars")
-    st.markdown("**Step 5 — Strategies**")
-    strategy_options = ["RSI (buy <30, exit at 50/70/EOD)", "MACD crossover", "EMA 9/21 crossover", COMBINED_OPTION_LABEL]
-    strategies = st.multiselect("Strategies", strategy_options, default=strategy_options, label_visibility="collapsed")
-    st.markdown("**Step 5b — Custom entry conditions**")
-    st.caption("Select which conditions must all be true for a LONG entry. Backtest runs as \"Custom\" strategy.")
-    condition_options = [name for name, _ in INDICATOR_CONDITIONS]
-    custom_conditions_display = st.multiselect("Conditions (all must agree)", condition_options, default=[], label_visibility="collapsed")
-    custom_condition_keys = [k for name, k in INDICATOR_CONDITIONS if name in custom_conditions_display]
+    st.markdown("**Step 5 — RSI thresholds**")
+    with st.expander("RSI (buy below / exit above)", expanded=True):
+        rsi_low = st.number_input("RSI low (buy when below)", min_value=1, max_value=50, value=30, step=1, key="rsi_low")
+        rsi_high = st.number_input("RSI high (exit when above)", min_value=50, max_value=100, value=70, step=1, key="rsi_high")
+    st.caption("One run = all strategies: RSI, MACD, EMA, RSI+MACD, RSI+EMA, MACD+EMA, RSI+MACD+EMA. Results sorted by return (best first).")
     st.markdown("**Step 6 — Investment amount**")
     if "analytics_inv" not in st.session_state:
         st.session_state.analytics_inv = 10000
@@ -1003,50 +1000,58 @@ st.markdown(f'''
 </div>
 ''', unsafe_allow_html=True)
 
-if not strategies and not custom_condition_keys:
-    st.warning("Select at least one strategy and/or custom entry conditions in the sidebar.")
-    st.stop()
-individual_strategies = [s for s in strategies if s != COMBINED_OPTION_LABEL]
-if COMBINED_OPTION_LABEL in strategies and not individual_strategies:
-    st.warning("Select at least one individual strategy (MACD, EMA, or RSI) along with Combined.")
-    st.stop()
-
 if not run:
-    st.info("Configure options in the **sidebar** and click **▶ Run Backtest** to see results.")
+    st.info("Upload a CSV, select **date** and **amount**, then click **▶ Run Backtest** to see all strategies in one run (sorted by return, best first).")
     st.stop()
 
-# Map display name -> function (individual only)
-strategy_fns = {
-    "RSI (buy <30, exit at 50/70/EOD)": _backtest_rsi,
-    "MACD crossover": _backtest_macd,
-    "EMA 9/21 crossover": _backtest_ema,
-}
-run_combined = COMBINED_OPTION_LABEL in strategies
+# Fixed set: run ALL strategies individually + all combinations (ab, ac, bc, abc)
+rsi_label = f"RSI (buy <{int(rsi_low)}, exit at 50/{int(rsi_high)}/EOD)"
+strategy_fns = {"MACD crossover": _backtest_macd, "EMA 9/21 crossover": _backtest_ema}
 
-# Run backtests
+# 1) Individual: RSI, MACD, EMA
+individual_names = [rsi_label, "MACD crossover", "EMA 9/21 crossover"]
+# 2) Pairs: RSI+MACD, RSI+EMA, MACD+EMA
+pair_combos = [
+    [rsi_label, "MACD crossover"],
+    [rsi_label, "EMA 9/21 crossover"],
+    ["MACD crossover", "EMA 9/21 crossover"],
+]
+# 3) All three: RSI+MACD+EMA
+full_combo = [rsi_label, "MACD crossover", "EMA 9/21 crossover"]
+
 all_results = []
-combined_result = None  # { metrics, trades, df_plot, signal_table_df } or None
+combined_result = None
 notional = investment if (investment and investment > 0) else None
-with st.spinner("Running backtests..."):
-    for name in individual_strategies:
-        fn = strategy_fns.get(name)
-        if not fn:
-            continue
-        metrics, trades, df_plot = fn(df_run, notional=notional)
-        all_results.append({"metrics": metrics, "trades": trades, "df_plot": df_plot, "is_combined": False})
-    if run_combined and individual_strategies:
+
+with st.spinner("Running all strategies (7 backtests)…"):
+    # Individual strategies
+    for name in individual_names:
         try:
-            c_metrics, c_trades, c_df_plot, c_signal_table = _run_combined_strategy(df_run, individual_strategies, notional=notional)
-            combined_result = {"metrics": c_metrics, "trades": c_trades, "df_plot": c_df_plot, "signal_table_df": c_signal_table, "is_combined": True}
-            all_results.append({"metrics": c_metrics, "trades": c_trades, "df_plot": c_df_plot, "is_combined": True, "signal_table_df": c_signal_table})
+            if name.startswith("RSI ("):
+                metrics, trades, df_plot = _backtest_rsi(df_run, notional=notional, rsi_low=rsi_low, rsi_high=rsi_high)
+            else:
+                fn = strategy_fns.get(name)
+                metrics, trades, df_plot = fn(df_run, notional=notional)
+            all_results.append({"metrics": metrics, "trades": trades, "df_plot": df_plot, "is_combined": False, "strategy_names": [name]})
         except Exception as e:
-            st.warning(f"Combined strategy failed: {e}")
-    if custom_condition_keys:
+            st.warning(f"Strategy **{name}** failed: {e}")
+    # Pair combinations
+    for combo in pair_combos:
         try:
-            cst_metrics, cst_trades, cst_df_plot, _ = _run_custom_conditions_backtest(df_run, custom_condition_keys, notional=notional)
-            all_results.append({"metrics": cst_metrics, "trades": cst_trades, "df_plot": cst_df_plot, "is_combined": False, "is_custom": True})
+            c_metrics, c_trades, c_df_plot, c_signal_table = _run_combined_strategy(df_run, combo, notional=notional, rsi_low=rsi_low, rsi_high=rsi_high)
+            all_results.append({"metrics": c_metrics, "trades": c_trades, "df_plot": c_df_plot, "is_combined": True, "signal_table_df": c_signal_table, "strategy_names": combo})
         except Exception as e:
-            st.warning(f"Custom conditions backtest failed: {e}")
+            st.warning(f"Combined **{' + '.join(combo)}** failed: {e}")
+    # Full combination (RSI + MACD + EMA)
+    try:
+        c_metrics, c_trades, c_df_plot, c_signal_table = _run_combined_strategy(df_run, full_combo, notional=notional, rsi_low=rsi_low, rsi_high=rsi_high)
+        combined_result = {"metrics": c_metrics, "trades": c_trades, "df_plot": c_df_plot, "signal_table_df": c_signal_table, "is_combined": True, "strategy_names": full_combo}
+        all_results.append({"metrics": c_metrics, "trades": c_trades, "df_plot": c_df_plot, "is_combined": True, "signal_table_df": c_signal_table, "strategy_names": full_combo})
+    except Exception as e:
+        st.warning(f"Combined (RSI + MACD + EMA) failed: {e}")
+
+# Sort by total return % descending (best first) — professional order
+all_results.sort(key=lambda r: r["metrics"]["total_return_pct"], reverse=True)
 
 if not all_results:
     st.warning("No results to show.")
@@ -1086,7 +1091,7 @@ banner_badge = "🟢 Profitable" if best_ret > 0 else ("🔴 All strategies lost
 date_tested = str(selected_date) if run_scope == "Single day" and selected_date else f"{df_run.index.min()} → {df_run.index.max()}"
 st.markdown(f'''
 <div class="analytics-results-banner">
-  <strong style="color: #ffffff;">Results</strong> — Date: {date_tested} &nbsp;|&nbsp; Best: <strong>{best_row["Strategy"]}</strong> ({best_ret:+.2f}%) &nbsp;|&nbsp; Strategies: {len(comparison)} &nbsp;|&nbsp; <span style="color: {"#00c853" if best_ret > 0 else "#ff3d57"};">{banner_badge}</span>
+  <strong style="color: #ffffff;">Results</strong> — Date: {date_tested} &nbsp;|&nbsp; Best: <strong>{best_row["Strategy"]}</strong> ({best_ret:+.2f}%) &nbsp;|&nbsp; All {len(comparison)} strategies (sorted by return) &nbsp;|&nbsp; <span style="color: {"#00c853" if best_ret > 0 else "#ff3d57"};">{banner_badge}</span>
 </div>
 ''', unsafe_allow_html=True)
 
@@ -1142,25 +1147,27 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Section 5 — Per-strategy cards
+# Section 5 — Per-strategy details (ordered by return, best first)
 st.markdown("---")
 st.markdown("#### 📋 Per-strategy details")
+st.caption("Strategies are ordered by **Total return %** (highest first). Expand any row for full metrics, trade log, and charts.")
 
 for card_idx, r in enumerate(all_results):
     m = r["metrics"]
     is_combined = r.get("is_combined", False)
     is_custom = r.get("is_custom", False)
+    rank = card_idx + 1
     badge_color = "#9c27b0" if is_combined else ("#ff9800" if is_custom else _strategy_badge_color(m["name"]))
     summary = f"{m['total_trades']} trades | {m['win_rate_pct']:.1f}% win | {m['total_return_pct']:+.2f}% return"
-    expander_label = f"**{m['name']}** — {summary}" if not is_combined else f"**{m['name']}** — {summary}"
-    with st.expander(expander_label, expanded=True):
+    expander_label = f"**#{rank} — {m['name']}** — {summary}"
+    with st.expander(expander_label, expanded=(rank <= 3)):
         header_note = " 🔗 Combined Strategy — trades only when ALL indicators agree" if is_combined else (" 📌 Custom — entry when your selected conditions all agree" if is_custom else "")
         st.markdown(f'<span style="display:inline-block;background:{badge_color}22;color:{badge_color};padding:4px 10px;border-radius:20px;font-size:0.85rem;font-weight:600;">{m["name"]}{header_note}</span>', unsafe_allow_html=True)
         st.markdown("")
         # "Why so few trades?" for combined
         if is_combined:
-            indiv_names = [x for x in individual_strategies if x in strategy_fns]
-            names_short = " + ".join(["MACD" if "MACD" in n else "EMA" if "EMA" in n else "RSI" for n in indiv_names])
+            strat_names = r.get("strategy_names", [])
+            names_short = " + ".join(["MACD" if "MACD" in n else "EMA" if "EMA" in n else "RSI" for n in strat_names])
             agreement_windows = len(r.get("signal_table_df", pd.DataFrame()))  # bars where ≥2 agreed
             completed = m["total_trades"]
             st.markdown(f"""

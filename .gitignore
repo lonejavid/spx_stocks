@@ -8,6 +8,11 @@
 
 # Backtests page cache (loaded CSV persists across refresh)
 .backtests_cache/
+*.parquet
+
+# Data files (not part of core project — regenerate or download as needed)
+*.csv
+spx_11/
 
 # Python
 __pycache__/
@@ -16,6 +21,12 @@ __pycache__/
 .eggs/
 venv/
 .venv/
+
+# Logs and temp
+*.log
+logs/
+*.tmp
+*.temp
 
 # IDE / OS
 .idea/
