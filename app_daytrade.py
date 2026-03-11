@@ -105,6 +105,17 @@ TICKER_VIX = "^VIX"
 TICKERS_STOCKS = ["AAPL", "MSFT", "NVDA", "AMZN", "QQQ", "SPY"]
 EST = pytz.timezone("America/New_York")
 
+# Timeframe options: (yfinance interval, display label)
+INTERVAL_OPTIONS = [
+    ("1m", "1 min"),
+    ("2m", "2 min"),
+    ("5m", "5 min"),
+    ("15m", "15 min"),
+    ("30m", "30 min"),
+    ("1h", "1 hour"),
+]
+DEFAULT_INTERVAL_INDEX = 2  # 5 min
+
 # 8 conditions for signal strength score (labels for display)
 CONDITION_LABELS = [
     "Price above/below VWAP",
@@ -380,13 +391,13 @@ def _countdown_to_next_open():
 
 
 @st.cache_data(ttl=120)
-def fetch_intraday_5m(ticker: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    """Fetch 5m data. If start_date/end_date given, fetch that range (for previous trading day)."""
+def fetch_intraday(ticker: str, interval: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Fetch intraday data for given interval (e.g. 1m, 2m, 5m, 15m, 30m, 1h)."""
     try:
         if start_date and end_date:
-            data = yf.download(ticker, start=start_date, end=end_date, interval="5m", progress=False, auto_adjust=True, threads=False)
+            data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False, auto_adjust=True, threads=False)
         else:
-            data = yf.download(ticker, period="1d", interval="5m", progress=False, auto_adjust=True, threads=False)
+            data = yf.download(ticker, period="1d", interval=interval, progress=False, auto_adjust=True, threads=False)
     except Exception:
         return pd.DataFrame()
     if data.empty or len(data) < 2:
@@ -414,8 +425,8 @@ def _filter_session(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=120)
-def fetch_all_intraday(show_date_str: str = None):
-    """Fetch 5m data. show_date_str = YYYY-MM-DD for that day; when None, use period=1d."""
+def fetch_all_intraday(show_date_str: str, interval: str):
+    """Fetch intraday data for given interval. show_date_str = YYYY-MM-DD for that day; when None, use period=1d."""
     out = {}
     if show_date_str:
         start = show_date_str
@@ -423,18 +434,18 @@ def fetch_all_intraday(show_date_str: str = None):
         end = end_d.isoformat()
     else:
         start, end = None, None
-    spx = fetch_intraday_5m(TICKERS_MAIN, start, end)
+    spx = fetch_intraday(TICKERS_MAIN, interval, start, end)
     if not spx.empty:
         spx = _filter_session(spx)
     out["spx"] = spx
-    vix_df = fetch_intraday_5m(TICKER_VIX, start, end)
+    vix_df = fetch_intraday(TICKER_VIX, interval, start, end)
     if not vix_df.empty:
         vix_df = _filter_session(vix_df)
     out["vix"] = vix_df
     vix_current = float(vix_df["Close"].iloc[-1]) if not vix_df.empty and "Close" in vix_df.columns else None
     out["vix_value"] = vix_current
     for t in TICKERS_STOCKS:
-        dt = fetch_intraday_5m(t, start, end)
+        dt = fetch_intraday(t, interval, start, end)
         if not dt.empty:
             dt = _filter_session(dt)
         out[t] = dt
@@ -849,11 +860,26 @@ def _dashboard_header():
     The top-bar 'Analytics' on Streamlit Cloud is Streamlit's own UI and causes 404; navigate via sidebar only."""
     st.markdown(DARK_CSS, unsafe_allow_html=True)
     with st.sidebar:
+        if "dashboard_interval" not in st.session_state:
+            st.session_state.dashboard_interval = INTERVAL_OPTIONS[DEFAULT_INTERVAL_INDEX][0]
+            st.session_state.dashboard_interval_label = INTERVAL_OPTIONS[DEFAULT_INTERVAL_INDEX][1]
+        interval_labels = [opt[1] for opt in INTERVAL_OPTIONS]
+        interval_values = [opt[0] for opt in INTERVAL_OPTIONS]
+        chosen_idx = st.selectbox(
+            "Timeframe",
+            range(len(INTERVAL_OPTIONS)),
+            format_func=lambda i: interval_labels[i],
+            index=interval_values.index(st.session_state.dashboard_interval) if st.session_state.dashboard_interval in interval_values else DEFAULT_INTERVAL_INDEX,
+            key="dashboard_interval_select",
+        )
+        st.session_state.dashboard_interval = interval_values[chosen_idx]
+        st.session_state.dashboard_interval_label = interval_labels[chosen_idx]
         st.caption("📊 **Backtests & charts:** click **Backtests** in the sidebar list.")
     head_col1, head_col2 = st.columns([4, 1])
     with head_col1:
         st.title("SPX Day Trading Dashboard")
-        st.caption("5-min intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
+        interval_label = st.session_state.get("dashboard_interval_label", "5 min")
+        st.caption(f"{interval_label} intraday · RSI · MACD · VWAP · EMA · BUY/SELL when RSI/VWAP/MACD cross + VIX filter · Best windows 10:00–11:30 & 14:30–15:30 EST")
     with head_col2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.caption("📊 **Backtests** (backtests & charts): open the **sidebar** (←) and click **Backtests** in the list.")
@@ -880,15 +906,17 @@ def _run_dashboard_body():
         st.session_state.sim_trades = []
         st.session_state.sim_position = None
         st.session_state.sim_date = today_et
+    interval = st.session_state.get("dashboard_interval", "5m")
+    interval_label = st.session_state.get("dashboard_interval_label", "5 min")
     if not is_market_open:
-        data = fetch_all_intraday(show_date_str)
+        data = fetch_all_intraday(show_date_str, interval)
     else:
-        data = fetch_all_intraday(None)
+        data = fetch_all_intraday(None, interval)
     spx = data["spx"]
     vix_df = data["vix"]
     vix_value = data.get("vix_value")
     if spx.empty or len(spx) < 2:
-        st.warning("Not enough SPX 5-minute data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
+        st.warning(f"Not enough SPX {interval_label} data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
         return
     spx = add_indicators(spx)
     # Rehydrate condition checkboxes from file when any key is missing (e.g. after navigating back from another page)
@@ -912,8 +940,8 @@ def _run_dashboard_body():
     # Market status banner
     if is_market_open:
         st.markdown(
-            '<div class="market-banner" style="background: linear-gradient(90deg, rgba(46,204,113,0.25), rgba(46,204,113,0.1)); border: 1px solid #2ecc71; border-radius: 8px; margin-bottom: 1rem;">'
-            '<span>🟢 <strong>Market Open</strong> — Live data updating every 5 min</span></div>',
+            f'<div class="market-banner" style="background: linear-gradient(90deg, rgba(46,204,113,0.25), rgba(46,204,113,0.1)); border: 1px solid #2ecc71; border-radius: 8px; margin-bottom: 1rem;">'
+            f'<span>🟢 <strong>Market Open</strong> — Live data updating every {interval_label}</span></div>',
             unsafe_allow_html=True,
         )
     else:
@@ -1290,13 +1318,13 @@ def _run_dashboard_body():
 
     # SPX intraday: price chart — always Close; VWAP and EMAs only if that indicator is selected
     chart_spx = spx[~spx.index.duplicated(keep="first")].sort_index()
-    title_parts = ["SPX 5-min"]
+    title_parts = [f"SPX {interval_label}"]
     if show_vwap:
         title_parts.append("VWAP")
     if show_ema:
         title_parts.append("EMAs")
     chart_title = f"{' & '.join(title_parts)} — {data_label} (9:30 AM–4:00 PM ET only)"
-    st.subheader("SPX 5-min price" + (" & VWAP" if show_vwap else "") + (" & EMA 9/21" if show_ema else ""))
+    st.subheader(f"SPX {interval_label} price" + (" & VWAP" if show_vwap else "") + (" & EMA 9/21" if show_ema else ""))
     fig_price = go.Figure()
     fig_price.add_trace(go.Scatter(
         x=chart_spx.index, y=chart_spx["Close"], name="SPX",
@@ -1399,7 +1427,7 @@ def _run_dashboard_body():
 
     # Auto-refresh note
     st.markdown("---")
-    st.caption("Data refreshes every 5 minutes automatically. Green zones on chart: 10:00–11:30 AM & 2:30–3:30 PM EST.")
+    st.caption(f"Data at {interval_label} timeframe. Green zones on chart: 10:00–11:30 AM & 2:30–3:30 PM EST.")
 
 
 # Auto-refresh every 5 minutes when Streamlit supports run_every

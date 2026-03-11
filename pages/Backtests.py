@@ -948,7 +948,15 @@ with st.sidebar:
     st.markdown("### ⚙️ Configuration")
     st.markdown('<span class="analytics-step">Step 1 — Upload CSV ✓</span>', unsafe_allow_html=True)
     st.markdown("**Step 2 — Interval**")
-    interval = st.selectbox("Interval", ["5m", "15m", "30m", "1d"], index=0, label_visibility="collapsed")
+    interval_options = ["1m", "2m", "5m", "15m", "30m", "1h", "1d"]
+    interval_labels = ["1 min", "2 min", "5 min", "15 min", "30 min", "1 hour", "1 day"]
+    interval = st.selectbox(
+        "Interval",
+        interval_options,
+        index=2,
+        format_func=lambda x: interval_labels[interval_options.index(x)] if x in interval_options else x,
+        label_visibility="collapsed",
+    )
     st.markdown("**Step 3 — Backtest mode**")
     run_scope = st.radio("Mode", ["Single day", "Entire period"], horizontal=True, label_visibility="collapsed")
     dates_in_file = sorted({(t.date() if hasattr(t, "date") else pd.Timestamp(t).date()) for t in df.index})
@@ -990,12 +998,13 @@ with st.sidebar:
 # Info bar (Section 1 continued — after sidebar so we have interval)
 date_min = df.index.min()
 date_max = df.index.max()
+interval_display = interval_labels[interval_options.index(interval)] if interval in interval_options else interval
 # file_name already set above (from session_state when using stored df, or from upload when parsing)
 st.markdown(f'''
 <div class="analytics-info-bar">
   <span class="analytics-info-item">📅 <strong>Date range</strong> {date_min.strftime("%Y-%m-%d") if hasattr(date_min, "strftime") else date_min} → {date_max.strftime("%Y-%m-%d") if hasattr(date_max, "strftime") else date_max}</span>
   <span class="analytics-info-item">📊 <strong>Total bars</strong> {len(df):,}</span>
-  <span class="analytics-info-item">⏱️ <strong>Interval</strong> {interval}</span>
+  <span class="analytics-info-item">⏱️ <strong>Interval</strong> {interval_display}</span>
   <span class="analytics-info-item">📁 <strong>File</strong> {file_name}</span>
 </div>
 ''', unsafe_allow_html=True)
