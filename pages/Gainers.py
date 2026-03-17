@@ -1,12 +1,15 @@
 """
 Top Gainers — Leading gainers by % change from previous close.
 Click a symbol for deep analysis: multi-timeframe candlestick, volume, MACD, ADX, EMA.
+Live Mode: auto-refresh every 60s with audio/visual alerts for new high-score stocks.
 """
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -19,12 +22,24 @@ from gainers_tv import get_top_gainers_sp500, fetch_stock_chart_data, run_gainer
 
 st.set_page_config(page_title="Top Gainers", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
 
+
+@st.cache_data(ttl=300)
+def _cached_gainers(limit: int, timeframe: str):
+    return get_top_gainers_sp500(limit=limit, timeframe=timeframe)
+
 if "gainers_selected_symbol" not in st.session_state:
     st.session_state.gainers_selected_symbol = None
 if "gainers_bt_summary" not in st.session_state:
     st.session_state.gainers_bt_summary = None
 if "gainers_bt_details" not in st.session_state:
     st.session_state.gainers_bt_details = None
+# Live alert system
+if "gainers_live_mode" not in st.session_state:
+    st.session_state.gainers_live_mode = False
+if "previous_scanner_symbols" not in st.session_state:
+    st.session_state.previous_scanner_symbols = None  # set of symbols that met alert criteria last scan
+if "alert_log" not in st.session_state:
+    st.session_state.alert_log = []  # last 20 alert strings
 
 def _fmt_vol(v):
     if v is None or (isinstance(v, (int, float)) and (v != v or v < 0)):
@@ -53,16 +68,32 @@ with tab_live:
 
     limit = st.slider("Number of rows", 10, 100, 50, key="gainers_limit")
 
-    if st.button("↻ Refresh gainers", type="primary", key="bt_refresh"):
-        st.rerun()
+    live_col, refresh_col, _ = st.columns([1, 1, 2])
+    with live_col:
+        live_mode = st.toggle("Live Mode ON/OFF", value=st.session_state.gainers_live_mode, key="gainers_live_toggle")
+        st.session_state.gainers_live_mode = live_mode
+    with refresh_col:
+        if st.button("↻ Refresh", type="primary", key="bt_refresh"):
+            _cached_gainers.clear()
+            st.rerun()
 
     with st.spinner("Loading S&P 500 gainers..."):
-        gainers = get_top_gainers_sp500(limit=limit, timeframe="1d")
+        gainers = _cached_gainers(limit, "1d")
 
     if not gainers:
         st.info("No S&P 500 gainers data. Check connection and try again.")
     else:
-        # Build display table: Change From Close(%), Symbol, Price, Volume, Float, Rel Vol Daily, Rel Vol 5m, Gap(%), Short Interest
+        # Filter controls above table
+        st.markdown("**Filters**")
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            min_gap_filter = st.slider("Min Gap %", 0.0, 10.0, 0.0, 0.5, key="live_min_gap")
+        with f2:
+            min_vol_ratio_filter = st.slider("Min Volume Ratio", 1.0, 5.0, 1.0, 0.1, key="live_min_vol")
+        with f3:
+            min_score_filter = st.slider("Min Score", 0.0, 20.0, 0.0, 0.5, key="live_min_score")
+
+        # Build rows with new fields; apply filters
         rows = []
         for g in gainers:
             change_pct = g.get("change_pct")
@@ -70,94 +101,169 @@ with tab_live:
             if not symbol or str(symbol).lower() in ("none", "nan"):
                 continue
             price_val = g.get("price")
-            # Skip rows with no price or zero (avoids misleading $0.00 from data glitches)
             if price_val is None or (isinstance(price_val, (int, float)) and (price_val != price_val or price_val <= 0)):
                 continue
+            gap_pct = g.get("gap_pct")
+            gap_val = float(gap_pct) if gap_pct is not None and not (isinstance(gap_pct, float) and pd.isna(gap_pct)) else 0.0
+            vol_ratio = g.get("volume_ratio")
+            vol_ratio_val = float(vol_ratio) if vol_ratio is not None and not (isinstance(vol_ratio, float) and pd.isna(vol_ratio)) else 0.0
+            score_val = g.get("scanner_score")
+            score_val = float(score_val) if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)) else 0.0
+            if gap_val < min_gap_filter or vol_ratio_val < min_vol_ratio_filter or score_val < min_score_filter:
+                continue
+            intraday = g.get("intraday_move_pct")
+            intraday_val = intraday if intraday is not None else 0.0
             rows.append({
                 "Change From Close(%)": change_pct if change_pct is not None else 0.0,
                 "Symbol": symbol,
                 "Price": price_val,
                 "Volume": _fmt_vol(g.get("volume")),
+                "Volume Ratio": vol_ratio_val,
+                "Intraday Move %": intraday_val,
+                "Score": score_val,
                 "Float": "—",
                 "Relative Volume (Daily)": g.get("relative_volume") if g.get("relative_volume") is not None else "—",
-                "Gap(%)": g.get("gap_pct") if g.get("gap_pct") is not None else (change_pct if change_pct is not None else "—"),
+                "Gap(%)": gap_pct if gap_pct is not None else (change_pct if change_pct is not None else "—"),
                 "Short Interest": "—",
             })
 
         df = pd.DataFrame(rows)
-
-        # Style: green for change %, sort by Change From Close descending (already from API)
         df = df.sort_values("Change From Close(%)", ascending=False).reset_index(drop=True)
 
-        # Color change column: green shades for positive
-        def _color_change(v):
-            if v is None or (isinstance(v, float) and (pd.isna(v) or v < 0)):
-                return ""
-            try:
-                x = float(v)
-                if x >= 20:
-                    return "background-color: rgba(34, 197, 94, 0.35); color: #22c55e; font-weight: 600;"
-                if x >= 10:
-                    return "background-color: rgba(34, 197, 94, 0.2); color: #4ade80;"
-                return "color: #86efac;"
-            except Exception:
-                return ""
+        # Alert detection: scanner_score > 5 and gap_pct > 2 (from raw gainers)
+        alert_symbols_this_scan = set()
+        for g in gainers:
+            sym = (g.get("symbol") or "").strip()
+            if not sym:
+                continue
+            score_val = g.get("scanner_score")
+            score_val = float(score_val) if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)) else 0.0
+            gap_val = g.get("gap_pct")
+            gap_val = float(gap_val) if gap_val is not None and not (isinstance(gap_val, float) and pd.isna(gap_val)) else 0.0
+            if score_val > 5 and gap_val > 2:
+                alert_symbols_this_scan.add(sym)
+        prev = st.session_state.previous_scanner_symbols
+        if prev is None:
+            st.session_state.previous_scanner_symbols = set(alert_symbols_this_scan)
+            new_alert_symbols = set()
+        else:
+            new_alert_symbols = alert_symbols_this_scan - prev
+            st.session_state.previous_scanner_symbols = set(alert_symbols_this_scan)
+        for sym in new_alert_symbols:
+            g = next((x for x in gainers if (x.get("symbol") or "").strip() == sym), None)
+            if g:
+                ts = now.strftime("%H:%M")
+                gap = g.get("gap_pct") or 0
+                vr = g.get("volume_ratio") or 0
+                sc = g.get("scanner_score") or 0
+                line = f"{ts} — {sym} gapped {gap:.2f}% with volume ratio {vr:.2f} — Score: {sc:.2f}"
+                st.session_state.alert_log.append(line)
+        st.session_state.alert_log = st.session_state.alert_log[-20:]
 
-        def _color_gap(v):
-            if v is None or v == "—" or (isinstance(v, float) and pd.isna(v)):
-                return ""
-            try:
-                x = float(v)
-                if x > 0:
-                    return "color: #22c55e;"
-            except Exception:
-                pass
-            return ""
+        # New-alerts badge and beep
+        if new_alert_symbols:
+            st.markdown(
+                f'<span style="background-color: #ef4444; color: white; padding: 6px 12px; border-radius: 6px; font-weight: 700;">🔔 {len(new_alert_symbols)} NEW ALERTS</span>',
+                unsafe_allow_html=True,
+            )
+            beep_js = """
+            <script>
+            (function() {
+                try {
+                    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+                    gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.8);
+                    oscillator.start(audioCtx.currentTime);
+                    oscillator.stop(audioCtx.currentTime + 0.8);
+                } catch (e) {}
+            })();
+            </script>
+            """
+            components.html(beep_js, height=0)
 
-        # Format for display (keep df numeric for styling)
+        # Summary bar
+        n_found = len(df)
+        avg_gap = df["Gap(%)"].mean() if n_found and "Gap(%)" in df.columns else 0.0
+        try:
+            avg_gap = float(avg_gap) if avg_gap is not None and not (isinstance(avg_gap, float) and pd.isna(avg_gap)) else 0.0
+        except Exception:
+            avg_gap = 0.0
+        avg_vol_ratio = df["Volume Ratio"].mean() if n_found else 0.0
+        st.markdown(
+            f"**{n_found} stocks found** | **Avg Gap:** {avg_gap:.2f}% | **Avg Volume Ratio:** {avg_vol_ratio:.2f} | **Last updated:** {now.strftime('%H:%M')}"
+        )
+
         def _fmt_price(x):
             if x is None or (isinstance(x, float) and pd.isna(x)):
                 return "—"
             v = float(x)
             return f"${v:,.4f}" if 0 < v < 1 else f"${v:,.2f}" if v >= 1 else "—"
-        if "Gap(%)" in df.columns:
-            display_df = df.copy()
-            display_df["Change From Close(%)"] = display_df["Change From Close(%)"].apply(lambda x: f"{x:.2f}%" if x is not None and not (isinstance(x, float) and pd.isna(x)) else "—")
-            display_df["Price"] = display_df["Price"].apply(_fmt_price)
-            gap_vals = display_df["Gap(%)"]
-            display_df["Gap(%)"] = gap_vals.apply(lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) and not (isinstance(x, float) and pd.isna(x)) else str(x) if x != "—" else "—")
-        else:
-            display_df = df.copy()
-            display_df["Change From Close(%)"] = display_df["Change From Close(%)"].apply(lambda x: f"{x:.2f}%" if x is not None and not (isinstance(x, float) and pd.isna(x)) else "—")
-            display_df["Price"] = display_df["Price"].apply(_fmt_price)
 
-        # Table with clickable symbols (each symbol is a button — click to open charts)
-        cols = ["Change From Close(%)", "Symbol", "Price", "Volume", "Float", "Relative Volume (Daily)", "Gap(%)", "Short Interest"]
-        header_cols = st.columns(8)
+        display_df = df.copy()
+        display_df["Change From Close(%)"] = display_df["Change From Close(%)"].apply(lambda x: f"{x:.2f}%" if x is not None and not (isinstance(x, float) and pd.isna(x)) else "—")
+        display_df["Price"] = display_df["Price"].apply(_fmt_price)
+        gap_vals = display_df["Gap(%)"]
+        display_df["Gap(%)"] = gap_vals.apply(lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) and not (isinstance(x, float) and pd.isna(x)) else str(x) if x != "—" else "—")
+        display_df["Volume Ratio"] = display_df["Volume Ratio"].apply(lambda x: f"{x:.2f}")
+        display_df["Intraday Move %"] = display_df["Intraday Move %"].apply(lambda x: f"{x:.2f}%")
+        display_df["Score"] = display_df["Score"].apply(lambda x: f"{x:.2f}")
+
+        # Table with indicator column + new-alert row highlight (yellow/green glow)
+        cols = ["", "Change From Close(%)", "Symbol", "Price", "Volume", "Volume Ratio", "Intraday Move %", "Score", "Gap(%)", "Float", "Relative Volume (Daily)", "Short Interest"]
+        header_cols = st.columns(12)
         for i, c in enumerate(cols):
-            header_cols[i].markdown(f"**{c}**")
+            header_cols[i].markdown(f"**{c}**" if c else " ")
         for row_idx, row in display_df.iterrows():
             r = display_df.loc[row_idx]
-            c0, c1, c2, c3, c4, c5, c6, c7 = st.columns(8)
-            c0.write(r["Change From Close(%)"])
             symbol = str(r["Symbol"]).strip()
+            is_new_alert = symbol in new_alert_symbols
+            row_style = ""
+            if is_new_alert:
+                row_style = "border: 2px solid #22c55e; border-radius: 6px; padding: 2px 4px; margin: 2px 0; box-shadow: 0 0 12px rgba(34, 197, 94, 0.5);"
+            c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(12)
+            if is_new_alert:
+                c0.markdown('<span style="background: #22c55e; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: 700;">NEW</span>', unsafe_allow_html=True)
+                c1.markdown(f'<div style="{row_style}">{r["Change From Close(%)"]}</div>', unsafe_allow_html=True)
+            else:
+                c0.write("")
+                c1.write(r["Change From Close(%)"])
             if symbol and symbol.lower() not in ("none", "nan", "—"):
-                # Key by symbol only so clicking any symbol updates selected regardless of row order
-                if c1.button(symbol, key=f"gainers_btn_{symbol}", use_container_width=True):
+                if c2.button(symbol, key=f"gainers_btn_{symbol}", use_container_width=True):
                     st.session_state.gainers_selected_symbol = symbol
                     st.rerun()
             else:
-                c1.write(symbol or "—")
-            c2.write(r["Price"])
-            c3.write(r["Volume"])
-            c4.write(r["Float"])
-            c5.write(r["Relative Volume (Daily)"])
-            c6.write(r["Gap(%)"])
-            c7.write(r["Short Interest"])
+                c2.write(symbol or "—")
+            c3.write(r["Price"])
+            c4.write(r["Volume"])
+            vr = df.loc[row_idx, "Volume Ratio"]
+            vr_style = "color: #22c55e;" if vr > 2 else "color: #eab308;" if vr >= 1.5 else "color: #9ca3af;"
+            c5.markdown(f"<span style='{vr_style}'>{r['Volume Ratio']}</span>", unsafe_allow_html=True)
+            im = df.loc[row_idx, "Intraday Move %"]
+            im_style = "color: #22c55e;" if im >= 0 else "color: #ef4444;"
+            c6.markdown(f"<span style='{im_style}'>{r['Intraday Move %']}</span>", unsafe_allow_html=True)
+            sc = df.loc[row_idx, "Score"]
+            sc_style = "color: #22c55e;" if sc > 5 else "color: #eab308;" if sc >= 2 else "color: #ef4444;"
+            c7.markdown(f"<span style='{sc_style}'>{r['Score']}</span>", unsafe_allow_html=True)
+            c8.write(r["Gap(%)"])
+            c9.write(r["Float"])
+            c10.write(r["Relative Volume (Daily)"])
+            c11.write(r["Short Interest"])
 
-        st.caption(f"Showing top {len(display_df)} S&P 500 gainers • Click any symbol for charts (price, volume, MACD, ADX)")
+        st.caption(f"Showing {n_found} S&P 500 gainers • Click any symbol for charts (price, volume, MACD, ADX)")
 
-        # When a symbol was clicked, show charts below (for any selected symbol)
+        # Alert Log (last 20 alerts, scrollable)
+        st.markdown("**Alert Log**")
+        log_lines = st.session_state.alert_log[-20:]
+        log_text = "\n".join(reversed(log_lines)) if log_lines else "No alerts yet. Alerts trigger when scanner_score > 5 and gap_pct > 2 and the stock is new this scan."
+        st.text_area("Alert log content", value=log_text, height=120, disabled=True, key="alert_log_display", label_visibility="collapsed")
+
+        # When a symbol was clicked, show charts below (before countdown so they always render)
         if st.session_state.gainers_selected_symbol:
             st.markdown("---")
             ticker = st.session_state.gainers_selected_symbol
@@ -166,6 +272,7 @@ with tab_live:
                 st.rerun()
             st.markdown(f"### {ticker} — Price, Volume, MACD & ADX")
             timeframes = [
+                ("5min Today", "1d", "5m"),
                 ("1D (3 months)", "3mo", "1d"),
                 ("5m (5 days)", "5d", "5m"),
                 ("1h (1 month)", "1mo", "1h"),
@@ -231,6 +338,15 @@ with tab_live:
             if not any_chart_shown:
                 st.info(f"No chart data available for **{ticker}** right now. Try again in a minute (rate limit) or check the symbol.")
 
+        # Live Mode: countdown and auto-refresh every 60s (after charts so symbol click always shows graphs)
+        if live_mode:
+            countdown_placeholder = st.empty()
+            for secs_left in range(60, 0, -1):
+                countdown_placeholder.markdown(f"**Next refresh in: {secs_left}s**")
+                time.sleep(1)
+            _cached_gainers.clear()
+            st.rerun()
+
 # ---------- TAB 2: BACKTEST ----------
 with tab_backtest:
     st.markdown("Simulate the scanner: each day we take the **top N stocks by gap %** (open vs prior close), then check how many **moved up by EOD** (close vs open ≥ threshold).")
@@ -245,10 +361,21 @@ with tab_backtest:
         top_n = st.number_input("Top N per day", min_value=5, max_value=50, value=20, key="bt_top_n")
     with col_pct:
         min_eod_pct = st.number_input("Min EOD move % (win)", min_value=0.5, max_value=10.0, value=2.0, step=0.5, key="bt_min_eod")
+    st.markdown("**Filters (applied before taking top N per day)**")
+    col_gap, col_vol = st.columns(2)
+    with col_gap:
+        min_gap_pct = st.slider("Min Gap %", 0.5, 10.0, 2.0, 0.5, key="bt_min_gap")
+    with col_vol:
+        min_volume_ratio = st.slider("Min Volume Ratio", 1.0, 5.0, 1.5, 0.1, key="bt_min_vol")
     if st.button("Run Backtest", type="primary", key="bt_run"):
         with st.spinner("Running backtest (fetching daily data per ticker)…"):
             summary, details = run_gainers_backtest(
-                from_date=str(from_date), to_date=str(to_date), top_n=int(top_n), min_eod_pct=float(min_eod_pct)
+                from_date=str(from_date),
+                to_date=str(to_date),
+                top_n=int(top_n),
+                min_eod_pct=float(min_eod_pct),
+                min_gap_pct=float(min_gap_pct),
+                min_volume_ratio=float(min_volume_ratio),
             )
         st.session_state.gainers_bt_summary = summary
         st.session_state.gainers_bt_details = details
@@ -257,11 +384,45 @@ with tab_backtest:
         if s.get("error"):
             st.error(s["error"])
         else:
-            st.metric("Total alerts", s.get("total_alerts", 0))
-            st.metric("Wins (EOD ≥ threshold)", s.get("wins", 0))
-            st.metric("Win rate %", f"{s.get('win_rate_pct', 0):.1f}%")
-            st.metric("Avg EOD %", f"{s.get('avg_eod_pct', 0):.2f}%")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Total Alerts", s.get("total_alerts", 0))
+            m2.metric("Total Wins", s.get("wins", 0))
+            m3.metric("Win Rate %", f"{s.get('win_rate_pct', 0):.1f}%")
+            m4.metric("Avg EOD Move %", f"{s.get('avg_eod_move_pct', s.get('avg_eod_pct', 0)):.2f}%")
             st.caption(f"Days: {s.get('days_run', 0)} • Top N/day: {s.get('top_n_per_day')} • Threshold: {s.get('min_eod_threshold')}%")
+            # Win Rate by Month bar chart
+            by_month = s.get("by_month") or []
+            if by_month:
+                months = [x["month"] for x in by_month]
+                win_rates = [x["win_rate_pct"] for x in by_month]
+                fig_bt = go.Figure(data=[go.Bar(x=months, y=win_rates, marker_color="#22c55e", opacity=0.8)])
+                fig_bt.update_layout(
+                    title="Win Rate by Month",
+                    xaxis_title="Month",
+                    yaxis_title="Win Rate %",
+                    template="plotly_dark",
+                    height=360,
+                    margin=dict(t=50),
+                )
+                st.plotly_chart(fig_bt, use_container_width=True, key="bt_month_chart")
             if st.session_state.gainers_bt_details:
                 det_df = pd.DataFrame(st.session_state.gainers_bt_details)
-                st.dataframe(det_df, use_container_width=True, hide_index=True)
+                # Style Win column: green "✓ Win" / red "✗ Loss"
+                def _style_win(val):
+                    if val is True:
+                        return "background-color: rgba(34, 197, 94, 0.35); color: #166534; font-weight: 600;"
+                    return "background-color: rgba(239, 68, 68, 0.35); color: #991b1b; font-weight: 600;"
+                display_det = det_df.copy()
+                display_det["Win"] = display_det["win"].map(lambda w: "✓ Win" if w else "✗ Loss")
+                display_det = display_det.drop(columns=["win"])
+                def _win_cell_style(v):
+                    if v == "✓ Win":
+                        return "background-color: rgba(34, 197, 94, 0.35); color: #166534; font-weight: 600;"
+                    if v == "✗ Loss":
+                        return "background-color: rgba(239, 68, 68, 0.35); color: #991b1b; font-weight: 600;"
+                    return ""
+                st.dataframe(
+                    display_det.style.map(_win_cell_style, subset=["Win"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )

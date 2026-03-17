@@ -569,20 +569,32 @@ def macd_cross_below(df: pd.DataFrame, idx: int) -> bool:
     return df[mc].iloc[idx] < df[sc].iloc[idx] and df[mc].iloc[idx - 1] >= df[sc].iloc[idx - 1]
 
 
+def _to_scalar(x):
+    """Convert Series or array-like to a single float for comparisons (avoids 'identically-labeled Series' errors)."""
+    if x is None:
+        return float("nan")
+    if isinstance(x, pd.Series):
+        x = x.iloc[-1] if len(x) else float("nan")
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def _get_confirmation_bools(data: dict) -> tuple:
     """Return (aapl_green, msft_green, qqq_above_vwap). Used for BUY/SELL confirmations."""
     aapl_green = msft_green = qqq_above_vwap = False
     aapl = data.get("AAPL") if data else None
     if aapl is not None and not aapl.empty and "Open" in aapl.columns and "Close" in aapl.columns:
-        aapl_green = aapl["Close"].iloc[-1] > aapl["Open"].iloc[0]
+        aapl_green = _to_scalar(aapl["Close"].iloc[-1]) > _to_scalar(aapl["Open"].iloc[0])
     msft = data.get("MSFT") if data else None
     if msft is not None and not msft.empty and "Open" in msft.columns and "Close" in msft.columns:
-        msft_green = msft["Close"].iloc[-1] > msft["Open"].iloc[0]
+        msft_green = _to_scalar(msft["Close"].iloc[-1]) > _to_scalar(msft["Open"].iloc[0])
     qqq = data.get("QQQ") if data else None
     if qqq is not None and not qqq.empty and "Close" in qqq.columns:
         qqq_vwap = _qwap(qqq)
         if not qqq_vwap.empty:
-            qqq_above_vwap = qqq["Close"].iloc[-1] > qqq_vwap.iloc[-1]
+            qqq_above_vwap = _to_scalar(qqq["Close"].iloc[-1]) > _to_scalar(qqq_vwap.iloc[-1])
     return aapl_green, msft_green, qqq_above_vwap
 
 
@@ -590,8 +602,8 @@ def _daily_signal_stats(df_spx: pd.DataFrame, vix_value: float, data: dict = Non
     """For displayed day: close, pct_change, n_buy, n_sell, first_buy_time, first_sell_time. Uses enabled_buy/enabled_sell when provided."""
     if df_spx.empty or len(df_spx) < 2:
         return None
-    close_final = df_spx["Close"].iloc[-1]
-    open_first = df_spx["Open"].iloc[0] if "Open" in df_spx.columns else df_spx["Close"].iloc[0]
+    close_final = _to_scalar(df_spx["Close"].iloc[-1])
+    open_first = _to_scalar(df_spx["Open"].iloc[0] if "Open" in df_spx.columns else df_spx["Close"].iloc[0])
     pct = ((close_final - open_first) / open_first * 100) if open_first and open_first != 0 else 0
     n_buy = n_sell = 0
     first_buy_time = first_sell_time = None
@@ -1031,7 +1043,9 @@ def _run_dashboard_body():
 
     # Always: Top row — SPX, VIX, RSI, Signal, Time (ET)
     last_close = spx["Close"].iloc[-1]
-    spx_price = float(last_close.squeeze()) if hasattr(last_close, "squeeze") else float(last_close)
+    if isinstance(last_close, pd.Series):
+        last_close = last_close.iloc[-1]
+    spx_price = float(last_close)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.metric("SPX", f"${spx_price:,.2f}")
@@ -1224,7 +1238,7 @@ def _run_dashboard_body():
             conditions_met = [CONDITION_LABELS[k] for k in range(8) if (enabled_buy[k] or enabled_sell[k]) and (buy_bools[k] or sell_bools[k])]
             cond_str = ", ".join(conditions_met) if conditions_met else "—"
             mc, sc = _macd_signal_cols(spx)
-            macd_status = "MACD > Signal" if (mc and sc and spx[mc].iloc[-1] > spx[sc].iloc[-1]) else "MACD < Signal"
+            macd_status = "MACD > Signal" if (mc and sc and _to_scalar(spx[mc].iloc[-1]) > _to_scalar(spx[sc].iloc[-1])) else "MACD < Signal"
             emoji = "🟢" if "BUY" in signal else "🔴"
             msg = (
                 f"{emoji} *{signal} — SPX Day Trading*\n"

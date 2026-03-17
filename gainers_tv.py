@@ -93,8 +93,8 @@ def get_sp500_tickers() -> List[str]:
 def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[str, Any]]:
     """
     Top gainers among S&P 500 stocks by % change from previous close. Uses yfinance.
-    timeframe: '1d' (change from prior close); '5' ignored for SP500 (we use daily).
-    Returns list of dicts: symbol, price, change_pct, volume, gap_pct, etc.
+    Fetches 25 days of data for 20-day average volume. Returns symbol, price, change_pct,
+    volume, gap_pct, volume_ratio, intraday_move_pct, total_move_pct, scanner_score.
     """
     if not HAS_YF:
         return _demo_gainers(limit)
@@ -107,7 +107,7 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
             try:
                 df = yf.download(
                     chunk,
-                    period="5d",
+                    period="25d",
                     interval="1d",
                     group_by="ticker",
                     auto_adjust=True,
@@ -126,13 +126,24 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                     close_prev = df["Close"].iloc[-2]
                     close_curr = df["Close"].iloc[-1]
                     open_curr = df["Open"].iloc[-1]
-                    vol = int(df["Volume"].iloc[-1]) if "Volume" in df.columns else 0
+                    vol_ser = df["Volume"] if "Volume" in df.columns else None
+                    vol = int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
+                    # 20-day average volume (use last 20 rows, or all if fewer)
+                    vol_avg = None
+                    if vol_ser is not None and len(vol_ser) >= 1:
+                        last_20 = vol_ser.iloc[-20:] if len(vol_ser) >= 20 else vol_ser
+                        vol_avg = float(last_20.mean())
                 except (IndexError, KeyError):
                     continue
                 if pd.isna(close_prev) or pd.isna(close_curr) or close_prev <= 0 or close_curr <= 0:
                     continue
                 change_pct = (float(close_curr) - float(close_prev)) / float(close_prev) * 100
-                gap_pct = (float(open_curr) - float(close_prev)) / float(close_prev) * 100 if not pd.isna(open_curr) else None
+                gap_pct = (float(open_curr) - float(close_prev)) / float(close_prev) * 100 if not pd.isna(open_curr) and close_prev else None
+                intraday_move_pct = (float(close_curr) - float(open_curr)) / float(open_curr) * 100 if open_curr is not None and not pd.isna(open_curr) and open_curr != 0 else 0.0
+                total_move_pct = change_pct
+                volume_ratio = (float(vol) / vol_avg) if vol_avg and vol_avg > 0 else (1.0 if vol else 0.0)
+                gap_val = gap_pct if gap_pct is not None else 0.0
+                scanner_score = round((gap_val * 0.4) + (volume_ratio * 0.3) + (intraday_move_pct * 0.3), 2)
                 all_rows.append({
                     "symbol": sym,
                     "price": round(float(close_curr), 4),
@@ -142,9 +153,12 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                     "gap_pct": round(gap_pct, 2) if gap_pct is not None else None,
                     "float_shares": None,
                     "short_interest": None,
+                    "volume_ratio": round(volume_ratio, 2),
+                    "intraday_move_pct": round(intraday_move_pct, 2),
+                    "total_move_pct": round(total_move_pct, 2),
+                    "scanner_score": scanner_score,
                 })
             else:
-                # MultiIndex: (ticker, ohlcv) or (ohlcv, ticker) depending on yfinance version
                 for sym in chunk:
                     try:
                         def _col(c: str):
@@ -162,6 +176,10 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                         close_curr = close_ser.iloc[-1]
                         open_curr = open_ser.iloc[-1] if open_ser is not None and len(open_ser) else None
                         vol = int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
+                        vol_avg = None
+                        if vol_ser is not None and len(vol_ser) >= 1:
+                            last_20 = vol_ser.iloc[-20:] if len(vol_ser) >= 20 else vol_ser
+                            vol_avg = float(last_20.mean())
                     except (IndexError, KeyError, TypeError):
                         continue
                     if pd.isna(close_prev) or pd.isna(close_curr) or close_prev <= 0 or close_curr <= 0:
@@ -170,6 +188,11 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                     gap_pct = None
                     if open_curr is not None and not pd.isna(open_curr):
                         gap_pct = (float(open_curr) - float(close_prev)) / float(close_prev) * 100
+                    intraday_move_pct = (float(close_curr) - float(open_curr)) / float(open_curr) * 100 if open_curr is not None and not pd.isna(open_curr) and open_curr != 0 else 0.0
+                    total_move_pct = change_pct
+                    volume_ratio = (float(vol) / vol_avg) if vol_avg and vol_avg > 0 else (1.0 if vol else 0.0)
+                    gap_val = gap_pct if gap_pct is not None else 0.0
+                    scanner_score = round((gap_val * 0.4) + (volume_ratio * 0.3) + (intraday_move_pct * 0.3), 2)
                     all_rows.append({
                         "symbol": sym,
                         "price": round(float(close_curr), 4),
@@ -179,6 +202,10 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                         "gap_pct": round(gap_pct, 2) if gap_pct is not None else None,
                         "float_shares": None,
                         "short_interest": None,
+                        "volume_ratio": round(volume_ratio, 2),
+                        "intraday_move_pct": round(intraday_move_pct, 2),
+                        "total_move_pct": round(total_move_pct, 2),
+                        "scanner_score": scanner_score,
                     })
     all_rows.sort(key=lambda x: x["change_pct"], reverse=True)
     return all_rows[:limit]
@@ -247,10 +274,10 @@ def get_top_gainers(limit: int = 50, timeframe: str = "1d") -> List[Dict[str, An
 def _demo_gainers(limit: int) -> List[Dict[str, Any]]:
     """Demo top gainers when TradingView not available."""
     return [
-        {"symbol": "AAPL", "price": 225.50, "change_pct": 2.5, "volume": 50_000_000, "relative_volume": 1.2, "gap_pct": 2.5, "float_shares": None, "short_interest": None},
-        {"symbol": "NVDA", "price": 128.20, "change_pct": 4.1, "volume": 80_000_000, "relative_volume": 1.8, "gap_pct": 4.0, "float_shares": None, "short_interest": None},
-        {"symbol": "TSLA", "price": 221.10, "change_pct": 3.2, "volume": 73_000_000, "relative_volume": 1.5, "gap_pct": 3.2, "float_shares": None, "short_interest": None},
-        {"symbol": "AMD", "price": 156.40, "change_pct": 1.9, "volume": 76_000_000, "relative_volume": 1.1, "gap_pct": 1.8, "float_shares": None, "short_interest": None},
+        {"symbol": "AAPL", "price": 225.50, "change_pct": 2.5, "volume": 50_000_000, "relative_volume": 1.2, "gap_pct": 2.5, "float_shares": None, "short_interest": None, "volume_ratio": 1.2, "intraday_move_pct": 1.5, "total_move_pct": 2.5, "scanner_score": 1.89},
+        {"symbol": "NVDA", "price": 128.20, "change_pct": 4.1, "volume": 80_000_000, "relative_volume": 1.8, "gap_pct": 4.0, "float_shares": None, "short_interest": None, "volume_ratio": 1.8, "intraday_move_pct": 2.0, "total_move_pct": 4.1, "scanner_score": 2.74},
+        {"symbol": "TSLA", "price": 221.10, "change_pct": 3.2, "volume": 73_000_000, "relative_volume": 1.5, "gap_pct": 3.2, "float_shares": None, "short_interest": None, "volume_ratio": 1.5, "intraday_move_pct": 1.8, "total_move_pct": 3.2, "scanner_score": 2.33},
+        {"symbol": "AMD", "price": 156.40, "change_pct": 1.9, "volume": 76_000_000, "relative_volume": 1.1, "gap_pct": 1.8, "float_shares": None, "short_interest": None, "volume_ratio": 1.1, "intraday_move_pct": 0.9, "total_move_pct": 1.9, "scanner_score": 1.35},
     ][:limit]
 
 
@@ -365,17 +392,21 @@ def run_gainers_backtest(
     to_date: str,
     top_n: int = 20,
     min_eod_pct: float = 2.0,
+    min_gap_pct: float = 0.0,
+    min_volume_ratio: float = 1.0,
     universe: Optional[List[str]] = None,
 ) -> tuple:
     """
-    Backtest: for each day, simulate "scanner would have alerted top N gainers by gap (open vs prev close)".
-    Then check: did each alerted stock move up by at least min_eod_pct by end of day?
-    Returns (summary_dict, details_list).
+    Backtest: for each day, simulate "scanner would have alerted top N gainers by gap (open vs prev close)"
+    after filtering by min_gap_pct and min_volume_ratio. Then check: did each alerted stock move up by
+    at least min_eod_pct by end of day? Returns (summary_dict, details_list). Summary includes
+    by_month (win rate per month) and avg_eod_move_pct.
     """
     if not HAS_YF:
         return {"error": "yfinance required"}, []
     tickers = universe or GAINERS_BACKTEST_UNIVERSE[:50]  # limit for speed
-    start = (pd.Timestamp(from_date) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    # Fetch extra days so we have 20 trading days before from_date for volume average
+    start = (pd.Timestamp(from_date) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
     end = pd.Timestamp(to_date).strftime("%Y-%m-%d")
     all_data = {}
     with contextlib.redirect_stderr(io.StringIO()):
@@ -383,7 +414,7 @@ def run_gainers_backtest(
             try:
                 t = yf.Ticker(sym)
                 df = t.history(start=start, end=end, auto_adjust=True)
-                if df is not None and len(df) >= 2 and "Open" in df.columns and "Close" in df.columns:
+                if df is not None and len(df) >= 2 and "Open" in df.columns and "Close" in df.columns and "Volume" in df.columns:
                     all_data[sym] = df
             except Exception:
                 continue
@@ -409,11 +440,22 @@ def run_gainers_backtest(
                     prev_close = hist["Close"].iloc[pos - 1]
                     open_today = hist["Open"].iloc[pos]
                     close_today = hist["Close"].iloc[pos]
+                    vol_today = hist["Volume"].iloc[pos] if "Volume" in hist.columns else 0
                     if pd.isna(prev_close) or pd.isna(open_today) or pd.isna(close_today) or prev_close <= 0 or open_today <= 0:
                         continue
                     gap_pct = (float(open_today) - float(prev_close)) / float(prev_close) * 100
                     eod_pct = (float(close_today) - float(open_today)) / float(open_today) * 100
-                    day_alerts.append({"ticker": sym, "gap_pct": gap_pct, "eod_pct": eod_pct})
+                    # 20-day average volume (prior 20 trading days)
+                    vol_avg = None
+                    if "Volume" in hist.columns and pos >= 20:
+                        vol_avg = float(hist["Volume"].iloc[pos - 20 : pos].mean())
+                    elif "Volume" in hist.columns and pos >= 1:
+                        vol_avg = float(hist["Volume"].iloc[:pos].mean())
+                    vol_val = float(vol_today) if not pd.isna(vol_today) else 0
+                    volume_ratio = (vol_val / vol_avg) if vol_avg and vol_avg > 0 else (1.0 if vol_val else 0.0)
+                    if gap_pct < min_gap_pct or volume_ratio < min_volume_ratio:
+                        continue
+                    day_alerts.append({"ticker": sym, "gap_pct": gap_pct, "eod_pct": eod_pct, "volume_ratio": volume_ratio})
                 except Exception:
                     continue
             day_alerts.sort(key=lambda x: x["gap_pct"], reverse=True)
@@ -437,13 +479,29 @@ def run_gainers_backtest(
     win_rate = (wins / total * 100) if total else 0
     avg_eod = sum(x["eod_pct"] for x in details) / total if total else 0
     days_run = len(set(x["date"] for x in details))
+
+    # Win rate by month
+    by_month = []
+    try:
+        df_d = pd.DataFrame(details)
+        df_d["month"] = pd.to_datetime(df_d["date"]).dt.to_period("M").astype(str)
+        for month in sorted(df_d["month"].unique()):
+            sub = df_d[df_d["month"] == month]
+            tw = sub["win"].sum()
+            tt = len(sub)
+            by_month.append({"month": month, "wins": int(tw), "total": tt, "win_rate_pct": round(tw / tt * 100, 1) if tt else 0})
+    except Exception:
+        by_month = []
+
     summary = {
         "total_alerts": total,
         "wins": wins,
         "win_rate_pct": round(win_rate, 1),
         "avg_eod_pct": round(avg_eod, 2),
+        "avg_eod_move_pct": round(avg_eod, 2),
         "days_run": days_run,
         "min_eod_threshold": min_eod_pct,
         "top_n_per_day": top_n,
+        "by_month": by_month,
     }
     return summary, details
