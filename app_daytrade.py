@@ -2,6 +2,8 @@
 SPX Day Trading Dashboard — 5-min intraday, RSI/MACD/VWAP/EMA, BUY/SELL signals, dark theme.
 Auto-refresh every 5 minutes. Best windows: 10:00–11:30 AM & 2:30–3:30 PM EST.
 """
+import contextlib
+import io
 import json
 import math
 import os
@@ -16,6 +18,11 @@ except ImportError:
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+
+try:
+    from yfinance import YFRateLimitError
+except ImportError:
+    YFRateLimitError = type("YFRateLimitError", (Exception,), {})  # no-op if old yfinance
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, time as dt_time
 from urllib.request import Request, urlopen
@@ -317,8 +324,17 @@ def _macd_df(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) 
 
 def _vwap(df: pd.DataFrame) -> pd.Series:
     """VWAP = cumsum(typical_price * volume) / cumsum(volume). Typical price = (H+L+C)/3."""
-    tp = (df["High"] + df["Low"] + df["Close"]) / 3
-    return (tp * df["Volume"]).cumsum() / df["Volume"].cumsum().replace(0, pd.NA).ffill()
+    def _col(x):
+        c = df[x] if x in df.columns else None
+        if c is None:
+            return None
+        return c.iloc[:, 0] if isinstance(c, pd.DataFrame) else c
+    high, low, close, vol = _col("High"), _col("Low"), _col("Close"), _col("Volume")
+    if high is None or low is None or close is None or vol is None:
+        return pd.Series(dtype=float)
+    tp = (high + low + close) / 3
+    out = (tp * vol).cumsum() / vol.cumsum().replace(0, pd.NA).ffill()
+    return out.iloc[:, 0] if isinstance(out, pd.DataFrame) else out
 
 
 def _is_market_open():
@@ -390,14 +406,23 @@ def _countdown_to_next_open():
     return " ".join(parts)
 
 
-@st.cache_data(ttl=120)
+# Set when a fetch fails due to Yahoo rate limit (so UI can show a specific message)
+_rate_limited = False
+
+@st.cache_data(ttl=300)
 def fetch_intraday(ticker: str, interval: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
     """Fetch intraday data for given interval (e.g. 1m, 2m, 5m, 15m, 30m, 1h)."""
+    global _rate_limited
+    _rate_limited = False
     try:
-        if start_date and end_date:
-            data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False, auto_adjust=True, threads=False)
-        else:
-            data = yf.download(ticker, period="1d", interval=interval, progress=False, auto_adjust=True, threads=False)
+        with contextlib.redirect_stderr(io.StringIO()):  # hide yfinance "1 Failed download" in terminal
+            if start_date and end_date:
+                data = yf.download(ticker, start=start_date, end=end_date, interval=interval, progress=False, auto_adjust=True, threads=False)
+            else:
+                data = yf.download(ticker, period="1d", interval=interval, progress=False, auto_adjust=True, threads=False)
+    except YFRateLimitError:
+        _rate_limited = True
+        return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
     if data.empty or len(data) < 2:
@@ -414,19 +439,22 @@ def _filter_session(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df.index.duplicated(keep="first")]
     df = df.sort_index()
     idx = pd.DatetimeIndex(df.index)
+    # yfinance intraday often returns UTC; convert to ET for session filter
     if idx.tzinfo is None:
-        idx = idx.tz_localize("America/New_York", ambiguous="infer")
+        idx = idx.tz_localize("UTC", ambiguous="infer").tz_convert("America/New_York")
     else:
         idx = idx.tz_convert("America/New_York")
+    df.index = idx
     start, end = dt_time(9, 30), dt_time(16, 0)
     keep = [start <= t <= end for t in idx.time]
     out = df.iloc[keep].copy()
     return out[~out.index.duplicated(keep="first")].sort_index()
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=300)
 def fetch_all_intraday(show_date_str: str, interval: str):
     """Fetch intraday data for given interval. show_date_str = YYYY-MM-DD for that day; when None, use period=1d."""
+    import time
     out = {}
     if show_date_str:
         start = show_date_str
@@ -435,20 +463,32 @@ def fetch_all_intraday(show_date_str: str, interval: str):
     else:
         start, end = None, None
     spx = fetch_intraday(TICKERS_MAIN, interval, start, end)
+    time.sleep(0.3)  # reduce chance of Yahoo rate limit
     if not spx.empty:
         spx = _filter_session(spx)
     out["spx"] = spx
+    out["rate_limited"] = _rate_limited
     vix_df = fetch_intraday(TICKER_VIX, interval, start, end)
+    time.sleep(0.3)
     if not vix_df.empty:
         vix_df = _filter_session(vix_df)
     out["vix"] = vix_df
-    vix_current = float(vix_df["Close"].iloc[-1]) if not vix_df.empty and "Close" in vix_df.columns else None
+    if not vix_df.empty and "Close" in vix_df.columns:
+        last = vix_df["Close"].iloc[-1]
+        try:
+            vix_current = float(last.squeeze()) if hasattr(last, "squeeze") else float(last)
+        except (TypeError, ValueError):
+            vix_current = None
+    else:
+        vix_current = None
     out["vix_value"] = vix_current
     for t in TICKERS_STOCKS:
+        time.sleep(0.2)
         dt = fetch_intraday(t, interval, start, end)
         if not dt.empty:
             dt = _filter_session(dt)
         out[t] = dt
+    out["rate_limited"] = out.get("rate_limited", False) or _rate_limited
     return out
 
 
@@ -458,8 +498,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return df
     df = df.copy()
     close = df["Close"]
+    # Ensure Series (e.g. from MultiIndex or single-column DataFrame)
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = close.astype(float)
     if HAS_PANDAS_TA:
-        df["RSI"] = ta.rsi(close, length=14)
+        rsi_out = ta.rsi(close, length=14)
+        df["RSI"] = rsi_out.iloc[:, 0] if isinstance(rsi_out, pd.DataFrame) else rsi_out
         macd = ta.macd(close, fast=12, slow=26, signal=9)
         if macd is not None and not macd.empty:
             for c in macd.columns:
@@ -470,7 +515,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         for c in m.columns:
             df[c] = m[c]
     if "High" in df.columns and "Low" in df.columns and "Volume" in df.columns:
-        df["VWAP"] = _vwap(df)
+        vwap_ser = _vwap(df)
+        df["VWAP"] = vwap_ser.iloc[:, 0] if isinstance(vwap_ser, pd.DataFrame) else vwap_ser
     df["EMA9"] = close.ewm(span=9, adjust=False).mean()
     df["EMA21"] = close.ewm(span=21, adjust=False).mean()
     return df
@@ -915,8 +961,24 @@ def _run_dashboard_body():
     spx = data["spx"]
     vix_df = data["vix"]
     vix_value = data.get("vix_value")
+    rate_limited = data.get("rate_limited", False)
     if spx.empty or len(spx) < 2:
-        st.warning(f"Not enough SPX {interval_label} data for this session. Try again when the market is open (9:30–16:00 ET) or check back for previous trading day.")
+        now_et_str = datetime.now(EST).strftime("%I:%M %p ET")
+        if rate_limited:
+            st.error(
+                "**Yahoo Finance rate limit** — Too many requests. Wait 1–2 minutes, then click **Retry fetch** below. "
+                "The app caches data for 5 minutes to reduce how often we ask for new data."
+            )
+        else:
+            st.warning(
+                f"Not enough SPX {interval_label} data for this session. "
+                f"**Current time: {now_et_str}** — Market hours are 9:30 AM–4:00 PM ET. "
+                f"If the market is open, data may be delayed; otherwise try again during market hours or check back for the previous trading day."
+            )
+        if st.button("Retry fetch", key="retry_spx_fetch"):
+            fetch_all_intraday.clear()
+            fetch_intraday.clear()
+            st.rerun()
         return
     spx = add_indicators(spx)
     # Rehydrate condition checkboxes from file when any key is missing (e.g. after navigating back from another page)
@@ -968,9 +1030,11 @@ def _run_dashboard_body():
         st.caption(f"Best trading windows: {window_note}")
 
     # Always: Top row — SPX, VIX, RSI, Signal, Time (ET)
+    last_close = spx["Close"].iloc[-1]
+    spx_price = float(last_close.squeeze()) if hasattr(last_close, "squeeze") else float(last_close)
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.metric("SPX", f"${spx['Close'].iloc[-1]:,.2f}")
+        st.metric("SPX", f"${spx_price:,.2f}")
     with c2:
         vix_str = f"{vix_value:.1f}" if vix_value is not None else "—"
         st.metric("VIX", vix_str)
@@ -1415,7 +1479,7 @@ def _run_dashboard_body():
         st.session_state.signals_history.append({
             "Time (ET)": now_est,
             "Type": signal,
-            "SPX": f"${spx['Close'].iloc[-1]:,.2f}",
+            "SPX": f"${spx_price:,.2f}",
             "Conditions": ", ".join(cond_triggered[:3]) + ("..." if len(cond_triggered) > 3 else ""),
         })
         st.session_state.signals_history = st.session_state.signals_history[-10:]
@@ -1438,13 +1502,13 @@ except Exception:
     run_every_available = False
 
 if run_every_available:
+    _dashboard_header()
     try:
-        _dashboard_header()
         @st.fragment(run_every=timedelta(seconds=300))
         def _auto_refresh():
             _run_dashboard_body()
         _auto_refresh()
     except Exception:
-        run_dashboard()
+        _run_dashboard_body()
 else:
     run_dashboard()

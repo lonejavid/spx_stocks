@@ -4,3 +4,5 @@ plotly>=5.18.0
 pandas>=2.0.0
 pytz
 python-dotenv>=1.0.0
+numpy>=1.24.0
+tradingview-screener>=3.1.0
