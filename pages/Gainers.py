@@ -81,7 +81,7 @@ with tab_live:
         gainers = _cached_gainers(limit, "1d")
 
     if not gainers:
-        st.info("No S&P 500 gainers data. Check connection and try again.")
+        st.info("No S&P 500 gainers data.. Check connection and try again.")
     else:
         # Filter controls above table
         st.markdown("**Filters**")
