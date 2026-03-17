@@ -89,7 +89,7 @@ with tab_live:
         with f1:
             min_gap_filter = st.slider("Min Gap %", 0.0, 10.0, 0.0, 0.5, key="live_min_gap")
         with f2:
-            min_vol_ratio_filter = st.slider("Min Volume Ratio", 1.0, 5.0, 1.0, 0.1, key="live_min_vol")
+            min_vol_ratio_filter = st.slider("Min Volume Ratio", 0.0, 5.0, 0.0, 0.1, key="live_min_vol")
         with f3:
             min_score_filter = st.slider("Min Score", 0.0, 20.0, 0.0, 0.5, key="live_min_score")
 
@@ -106,10 +106,15 @@ with tab_live:
             gap_pct = g.get("gap_pct")
             gap_val = float(gap_pct) if gap_pct is not None and not (isinstance(gap_pct, float) and pd.isna(gap_pct)) else 0.0
             vol_ratio = g.get("volume_ratio")
-            vol_ratio_val = float(vol_ratio) if vol_ratio is not None and not (isinstance(vol_ratio, float) and pd.isna(vol_ratio)) else 0.0
+            vol_ratio_val = float(vol_ratio) if vol_ratio is not None and not (isinstance(vol_ratio, float) and pd.isna(vol_ratio)) else None
             score_val = g.get("scanner_score")
-            score_val = float(score_val) if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)) else 0.0
-            if gap_val < min_gap_filter or vol_ratio_val < min_vol_ratio_filter or score_val < min_score_filter:
+            score_val = float(score_val) if score_val is not None and not (isinstance(score_val, float) and pd.isna(score_val)) else None
+            # Apply filters: treat missing volume_ratio/score as "pass" so old or incomplete data still shows rows
+            if gap_val < min_gap_filter:
+                continue
+            if vol_ratio_val is not None and vol_ratio_val < min_vol_ratio_filter:
+                continue
+            if score_val is not None and score_val < min_score_filter:
                 continue
             intraday = g.get("intraday_move_pct")
             intraday_val = intraday if intraday is not None else 0.0
@@ -118,9 +123,9 @@ with tab_live:
                 "Symbol": symbol,
                 "Price": price_val,
                 "Volume": _fmt_vol(g.get("volume")),
-                "Volume Ratio": vol_ratio_val,
+                "Volume Ratio": vol_ratio_val if vol_ratio_val is not None else 0.0,
                 "Intraday Move %": intraday_val,
-                "Score": score_val,
+                "Score": score_val if score_val is not None else 0.0,
                 "Float": "—",
                 "Relative Volume (Daily)": g.get("relative_volume") if g.get("relative_volume") is not None else "—",
                 "Gap(%)": gap_pct if gap_pct is not None else (change_pct if change_pct is not None else "—"),
@@ -128,7 +133,9 @@ with tab_live:
             })
 
         df = pd.DataFrame(rows)
-        df = df.sort_values("Change From Close(%)", ascending=False).reset_index(drop=True)
+        # When all rows are filtered out, DataFrame is empty and has no columns — sort would raise KeyError
+        if not df.empty and "Change From Close(%)" in df.columns:
+            df = df.sort_values("Change From Close(%)", ascending=False).reset_index(drop=True)
 
         # Alert detection: scanner_score > 5 and gap_pct > 2 (from raw gainers)
         alert_symbols_this_scan = set()
@@ -187,14 +194,14 @@ with tab_live:
             """
             components.html(beep_js, height=0)
 
-        # Summary bar
+        # Summary bar (safe when df is empty)
         n_found = len(df)
-        avg_gap = df["Gap(%)"].mean() if n_found and "Gap(%)" in df.columns else 0.0
+        avg_gap = df["Gap(%)"].mean() if n_found and not df.empty and "Gap(%)" in df.columns else 0.0
         try:
             avg_gap = float(avg_gap) if avg_gap is not None and not (isinstance(avg_gap, float) and pd.isna(avg_gap)) else 0.0
         except Exception:
             avg_gap = 0.0
-        avg_vol_ratio = df["Volume Ratio"].mean() if n_found else 0.0
+        avg_vol_ratio = df["Volume Ratio"].mean() if n_found and not df.empty and "Volume Ratio" in df.columns else 0.0
         st.markdown(
             f"**{n_found} stocks found** | **Avg Gap:** {avg_gap:.2f}% | **Avg Volume Ratio:** {avg_vol_ratio:.2f} | **Last updated:** {now.strftime('%H:%M')}"
         )
@@ -205,57 +212,61 @@ with tab_live:
             v = float(x)
             return f"${v:,.4f}" if 0 < v < 1 else f"${v:,.2f}" if v >= 1 else "—"
 
-        display_df = df.copy()
-        display_df["Change From Close(%)"] = display_df["Change From Close(%)"].apply(lambda x: f"{x:.2f}%" if x is not None and not (isinstance(x, float) and pd.isna(x)) else "—")
-        display_df["Price"] = display_df["Price"].apply(_fmt_price)
-        gap_vals = display_df["Gap(%)"]
-        display_df["Gap(%)"] = gap_vals.apply(lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) and not (isinstance(x, float) and pd.isna(x)) else str(x) if x != "—" else "—")
-        display_df["Volume Ratio"] = display_df["Volume Ratio"].apply(lambda x: f"{x:.2f}")
-        display_df["Intraday Move %"] = display_df["Intraday Move %"].apply(lambda x: f"{x:.2f}%")
-        display_df["Score"] = display_df["Score"].apply(lambda x: f"{x:.2f}")
+        # Table only when we have rows and expected columns (avoid KeyError on empty filtered result)
+        if not df.empty and "Change From Close(%)" in df.columns:
+            display_df = df.copy()
+            display_df["Change From Close(%)"] = display_df["Change From Close(%)"].apply(lambda x: f"{x:.2f}%" if x is not None and not (isinstance(x, float) and pd.isna(x)) else "—")
+            display_df["Price"] = display_df["Price"].apply(_fmt_price)
+            gap_vals = display_df["Gap(%)"]
+            display_df["Gap(%)"] = gap_vals.apply(lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) and not (isinstance(x, float) and pd.isna(x)) else str(x) if x != "—" else "—")
+            display_df["Volume Ratio"] = display_df["Volume Ratio"].apply(lambda x: f"{x:.2f}")
+            display_df["Intraday Move %"] = display_df["Intraday Move %"].apply(lambda x: f"{x:.2f}%")
+            display_df["Score"] = display_df["Score"].apply(lambda x: f"{x:.2f}")
 
-        # Table with indicator column + new-alert row highlight (yellow/green glow)
-        cols = ["", "Change From Close(%)", "Symbol", "Price", "Volume", "Volume Ratio", "Intraday Move %", "Score", "Gap(%)", "Float", "Relative Volume (Daily)", "Short Interest"]
-        header_cols = st.columns(12)
-        for i, c in enumerate(cols):
-            header_cols[i].markdown(f"**{c}**" if c else " ")
-        for row_idx, row in display_df.iterrows():
-            r = display_df.loc[row_idx]
-            symbol = str(r["Symbol"]).strip()
-            is_new_alert = symbol in new_alert_symbols
-            row_style = ""
-            if is_new_alert:
-                row_style = "border: 2px solid #22c55e; border-radius: 6px; padding: 2px 4px; margin: 2px 0; box-shadow: 0 0 12px rgba(34, 197, 94, 0.5);"
-            c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(12)
-            if is_new_alert:
-                c0.markdown('<span style="background: #22c55e; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: 700;">NEW</span>', unsafe_allow_html=True)
-                c1.markdown(f'<div style="{row_style}">{r["Change From Close(%)"]}</div>', unsafe_allow_html=True)
-            else:
-                c0.write("")
-                c1.write(r["Change From Close(%)"])
-            if symbol and symbol.lower() not in ("none", "nan", "—"):
-                if c2.button(symbol, key=f"gainers_btn_{symbol}", use_container_width=True):
-                    st.session_state.gainers_selected_symbol = symbol
-                    st.rerun()
-            else:
-                c2.write(symbol or "—")
-            c3.write(r["Price"])
-            c4.write(r["Volume"])
-            vr = df.loc[row_idx, "Volume Ratio"]
-            vr_style = "color: #22c55e;" if vr > 2 else "color: #eab308;" if vr >= 1.5 else "color: #9ca3af;"
-            c5.markdown(f"<span style='{vr_style}'>{r['Volume Ratio']}</span>", unsafe_allow_html=True)
-            im = df.loc[row_idx, "Intraday Move %"]
-            im_style = "color: #22c55e;" if im >= 0 else "color: #ef4444;"
-            c6.markdown(f"<span style='{im_style}'>{r['Intraday Move %']}</span>", unsafe_allow_html=True)
-            sc = df.loc[row_idx, "Score"]
-            sc_style = "color: #22c55e;" if sc > 5 else "color: #eab308;" if sc >= 2 else "color: #ef4444;"
-            c7.markdown(f"<span style='{sc_style}'>{r['Score']}</span>", unsafe_allow_html=True)
-            c8.write(r["Gap(%)"])
-            c9.write(r["Float"])
-            c10.write(r["Relative Volume (Daily)"])
-            c11.write(r["Short Interest"])
+            # Table with indicator column + new-alert row highlight (yellow/green glow)
+            cols = ["", "Change From Close(%)", "Symbol", "Price", "Volume", "Volume Ratio", "Intraday Move %", "Score", "Gap(%)", "Float", "Relative Volume (Daily)", "Short Interest"]
+            header_cols = st.columns(12)
+            for i, c in enumerate(cols):
+                header_cols[i].markdown(f"**{c}**" if c else " ")
+            for row_idx, row in display_df.iterrows():
+                r = display_df.loc[row_idx]
+                symbol = str(r["Symbol"]).strip()
+                is_new_alert = symbol in new_alert_symbols
+                row_style = ""
+                if is_new_alert:
+                    row_style = "border: 2px solid #22c55e; border-radius: 6px; padding: 2px 4px; margin: 2px 0; box-shadow: 0 0 12px rgba(34, 197, 94, 0.5);"
+                c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11 = st.columns(12)
+                if is_new_alert:
+                    c0.markdown('<span style="background: #22c55e; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75em; font-weight: 700;">NEW</span>', unsafe_allow_html=True)
+                    c1.markdown(f'<div style="{row_style}">{r["Change From Close(%)"]}</div>', unsafe_allow_html=True)
+                else:
+                    c0.write("")
+                    c1.write(r["Change From Close(%)"])
+                if symbol and symbol.lower() not in ("none", "nan", "—"):
+                    if c2.button(symbol, key=f"gainers_btn_{symbol}", use_container_width=True):
+                        st.session_state.gainers_selected_symbol = symbol
+                        st.rerun()
+                else:
+                    c2.write(symbol or "—")
+                c3.write(r["Price"])
+                c4.write(r["Volume"])
+                vr = df.loc[row_idx, "Volume Ratio"]
+                vr_style = "color: #22c55e;" if vr > 2 else "color: #eab308;" if vr >= 1.5 else "color: #9ca3af;"
+                c5.markdown(f"<span style='{vr_style}'>{r['Volume Ratio']}</span>", unsafe_allow_html=True)
+                im = df.loc[row_idx, "Intraday Move %"]
+                im_style = "color: #22c55e;" if im >= 0 else "color: #ef4444;"
+                c6.markdown(f"<span style='{im_style}'>{r['Intraday Move %']}</span>", unsafe_allow_html=True)
+                sc = df.loc[row_idx, "Score"]
+                sc_style = "color: #22c55e;" if sc > 5 else "color: #eab308;" if sc >= 2 else "color: #ef4444;"
+                c7.markdown(f"<span style='{sc_style}'>{r['Score']}</span>", unsafe_allow_html=True)
+                c8.write(r["Gap(%)"])
+                c9.write(r["Float"])
+                c10.write(r["Relative Volume (Daily)"])
+                c11.write(r["Short Interest"])
 
-        st.caption(f"Showing {n_found} S&P 500 gainers • Click any symbol for charts (price, volume, MACD, ADX)")
+            st.caption(f"Showing {n_found} S&P 500 gainers • Click any symbol for charts (price, volume, MACD, ADX)")
+        else:
+            st.caption("No rows match the current filters. Try lowering Min Gap %, Min Volume Ratio, or Min Score.")
 
         # Alert Log (last 20 alerts, scrollable)
         st.markdown("**Alert Log**")
@@ -263,80 +274,79 @@ with tab_live:
         log_text = "\n".join(reversed(log_lines)) if log_lines else "No alerts yet. Alerts trigger when scanner_score > 5 and gap_pct > 2 and the stock is new this scan."
         st.text_area("Alert log content", value=log_text, height=120, disabled=True, key="alert_log_display", label_visibility="collapsed")
 
-        # When a symbol was clicked, show charts below (before countdown so they always render)
+        # When a symbol was clicked, show charts in a single placeholder (avoids duplicate section on rerun/Live Mode)
+        _charts_placeholder = st.empty()
         if st.session_state.gainers_selected_symbol:
-            st.markdown("---")
             ticker = st.session_state.gainers_selected_symbol
-            if st.button("✕ Close deep analysis", key=f"close_deep_{ticker}"):
-                st.session_state.gainers_selected_symbol = None
-                st.rerun()
-            st.markdown(f"### {ticker} — Price, Volume, MACD & ADX")
-            timeframes = [
-                ("5min Today", "1d", "5m"),
-                ("1D (3 months)", "3mo", "1d"),
-                ("5m (5 days)", "5d", "5m"),
-                ("1h (1 month)", "1mo", "1h"),
-            ]
-            tabs = st.tabs([t[0] for t in timeframes])
-            any_chart_shown = False
-            for tab, (label, period, interval) in zip(tabs, timeframes):
-                with tab:
-                    with st.spinner(f"Loading {ticker} {label}…"):
-                        chart_df = fetch_stock_chart_data(ticker, period=period, interval=interval)
-                    fallback_note = None
-                    if chart_df is None or chart_df.empty or len(chart_df) < 5:
-                        # Fallback: show daily chart so user always sees something when daily data exists
-                        if interval != "1d":
-                            chart_df = fetch_stock_chart_data(ticker, period="3mo", interval="1d")
-                            if chart_df is not None and not chart_df.empty and len(chart_df) >= 5:
-                                fallback_note = f"No {label} data for this symbol. Showing daily chart instead."
+            with _charts_placeholder.container():
+                st.markdown("---")
+                if st.button("✕ Close deep analysis", key=f"close_deep_{ticker}"):
+                    st.session_state.gainers_selected_symbol = None
+                    st.rerun()
+                st.markdown(f"### {ticker} — Price, Volume, MACD & ADX")
+                timeframes = [
+                    ("5min Today", "1d", "5m"),
+                    ("1D (3 months)", "3mo", "1d"),
+                    ("5m (5 days)", "5d", "5m"),
+                    ("1h (1 month)", "1mo", "1h"),
+                ]
+                tabs = st.tabs([t[0] for t in timeframes])
+                any_chart_shown = False
+                for tab, (label, period, interval) in zip(tabs, timeframes):
+                    with tab:
+                        with st.spinner(f"Loading {ticker} {label}…"):
+                            chart_df = fetch_stock_chart_data(ticker, period=period, interval=interval)
+                        fallback_note = None
                         if chart_df is None or chart_df.empty or len(chart_df) < 5:
-                            st.warning(f"No data for {ticker}. This symbol may be OTC, delisted, or have no history.")
-                            continue
-                    any_chart_shown = True
-                    if fallback_note:
-                        st.info(fallback_note)
-                    elif len(chart_df) < 15:
-                        st.caption(f"Limited history for {ticker} ({len(chart_df)} bars).")
-                    idx = chart_df.index.tolist()
-                    fig = make_subplots(
-                        rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                        subplot_titles=(f"{ticker} Price (OHLC) + EMA 9/21", "Volume", "MACD (12, 26, 9)", "ADX (14)"),
-                        row_heights=[0.45, 0.15, 0.2, 0.2],
-                    )
-                    # Candlestick
-                    fig.add_trace(
-                        go.Candlestick(
-                            x=idx, open=chart_df["Open"], high=chart_df["High"], low=chart_df["Low"], close=chart_df["Close"],
-                            name="OHLC", increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
-                        ),
-                        row=1, col=1,
-                    )
-                    if "EMA9" in chart_df.columns:
-                        fig.add_trace(go.Scatter(x=idx, y=chart_df["EMA9"], name="EMA 9", line=dict(color="#a855f7", width=1.5)), row=1, col=1)
-                    if "EMA21" in chart_df.columns:
-                        fig.add_trace(go.Scatter(x=idx, y=chart_df["EMA21"], name="EMA 21", line=dict(color="#3b82f6", width=1.5)), row=1, col=1)
-                    # Volume (green/red by close vs open)
-                    vol_colors = ["#22c55e" if chart_df["Close"].iloc[i] >= chart_df["Open"].iloc[i] else "#ef4444" for i in range(len(chart_df))]
-                    fig.add_trace(go.Bar(x=idx, y=chart_df["Volume"], name="Volume", marker_color=vol_colors, opacity=0.7), row=2, col=1)
-                    # MACD
-                    if "MACD" in chart_df.columns and "MACD_signal" in chart_df.columns:
-                        fig.add_trace(go.Scatter(x=idx, y=chart_df["MACD"], name="MACD", line=dict(color="#00d4aa")), row=3, col=1)
-                        fig.add_trace(go.Scatter(x=idx, y=chart_df["MACD_signal"], name="Signal", line=dict(color="#f59e0b")), row=3, col=1)
-                    if "MACD_hist" in chart_df.columns:
-                        hist_colors = ["#22c55e" if v >= 0 else "#ef4444" for v in chart_df["MACD_hist"]]
-                        fig.add_trace(go.Bar(x=idx, y=chart_df["MACD_hist"], name="Histogram", marker_color=hist_colors, opacity=0.6), row=3, col=1)
-                    # ADX
-                    if "ADX" in chart_df.columns:
-                        fig.add_trace(go.Scatter(x=idx, y=chart_df["ADX"], name="ADX", line=dict(color="#a855f7", width=2)), row=4, col=1)
-                    fig.update_layout(template="plotly_dark", height=720, showlegend=True, margin=dict(t=50), xaxis_rangeslider_visible=False)
-                    fig.update_yaxes(title_text="Price", row=1, col=1)
-                    fig.update_yaxes(title_text="Volume", row=2, col=1)
-                    fig.update_yaxes(title_text="MACD", row=3, col=1)
-                    fig.update_yaxes(title_text="ADX", row=4, col=1)
-                    st.plotly_chart(fig, use_container_width=True, key=f"gainers_chart_{ticker}_{period}_{interval}")
-            if not any_chart_shown:
-                st.info(f"No chart data available for **{ticker}** right now. Try again in a minute (rate limit) or check the symbol.")
+                            if interval != "1d":
+                                chart_df = fetch_stock_chart_data(ticker, period="3mo", interval="1d")
+                                if chart_df is not None and not chart_df.empty and len(chart_df) >= 5:
+                                    fallback_note = f"No {label} data for this symbol. Showing daily chart instead."
+                            if chart_df is None or chart_df.empty or len(chart_df) < 5:
+                                st.warning(f"No data for {ticker}. This symbol may be OTC, delisted, or have no history.")
+                                continue
+                        any_chart_shown = True
+                        if fallback_note:
+                            st.info(fallback_note)
+                        elif len(chart_df) < 15:
+                            st.caption(f"Limited history for {ticker} ({len(chart_df)} bars).")
+                        idx = chart_df.index.tolist()
+                        fig = make_subplots(
+                            rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+                            subplot_titles=(f"{ticker} Price (OHLC) + EMA 9/21", "Volume", "MACD (12, 26, 9)", "ADX (14)"),
+                            row_heights=[0.45, 0.15, 0.2, 0.2],
+                        )
+                        fig.add_trace(
+                            go.Candlestick(
+                                x=idx, open=chart_df["Open"], high=chart_df["High"], low=chart_df["Low"], close=chart_df["Close"],
+                                name="OHLC", increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
+                            ),
+                            row=1, col=1,
+                        )
+                        if "EMA9" in chart_df.columns:
+                            fig.add_trace(go.Scatter(x=idx, y=chart_df["EMA9"], name="EMA 9", line=dict(color="#a855f7", width=1.5)), row=1, col=1)
+                        if "EMA21" in chart_df.columns:
+                            fig.add_trace(go.Scatter(x=idx, y=chart_df["EMA21"], name="EMA 21", line=dict(color="#3b82f6", width=1.5)), row=1, col=1)
+                        vol_colors = ["#22c55e" if chart_df["Close"].iloc[i] >= chart_df["Open"].iloc[i] else "#ef4444" for i in range(len(chart_df))]
+                        fig.add_trace(go.Bar(x=idx, y=chart_df["Volume"], name="Volume", marker_color=vol_colors, opacity=0.7), row=2, col=1)
+                        if "MACD" in chart_df.columns and "MACD_signal" in chart_df.columns:
+                            fig.add_trace(go.Scatter(x=idx, y=chart_df["MACD"], name="MACD", line=dict(color="#00d4aa")), row=3, col=1)
+                            fig.add_trace(go.Scatter(x=idx, y=chart_df["MACD_signal"], name="Signal", line=dict(color="#f59e0b")), row=3, col=1)
+                        if "MACD_hist" in chart_df.columns:
+                            hist_colors = ["#22c55e" if v >= 0 else "#ef4444" for v in chart_df["MACD_hist"]]
+                            fig.add_trace(go.Bar(x=idx, y=chart_df["MACD_hist"], name="Histogram", marker_color=hist_colors, opacity=0.6), row=3, col=1)
+                        if "ADX" in chart_df.columns:
+                            fig.add_trace(go.Scatter(x=idx, y=chart_df["ADX"], name="ADX", line=dict(color="#a855f7", width=2)), row=4, col=1)
+                        fig.update_layout(template="plotly_dark", height=720, showlegend=True, margin=dict(t=50), xaxis_rangeslider_visible=False)
+                        fig.update_yaxes(title_text="Price", row=1, col=1)
+                        fig.update_yaxes(title_text="Volume", row=2, col=1)
+                        fig.update_yaxes(title_text="MACD", row=3, col=1)
+                        fig.update_yaxes(title_text="ADX", row=4, col=1)
+                        st.plotly_chart(fig, use_container_width=True, key=f"gainers_chart_{ticker}_{period}_{interval}")
+                if not any_chart_shown:
+                    st.info(f"No chart data available for **{ticker}** right now. Try again in a minute (rate limit) or check the symbol.")
+        else:
+            _charts_placeholder.empty()
 
         # Live Mode: countdown and auto-refresh every 60s (after charts so symbol click always shows graphs)
         if live_mode:

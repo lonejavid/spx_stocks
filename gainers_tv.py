@@ -90,6 +90,16 @@ def get_sp500_tickers() -> List[str]:
     return SP500_FALLBACK_TICKERS
 
 
+def _safe_vol_int(x) -> int:
+    """Convert volume to int; handle NaN/None (e.g. when market is closed)."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return 0
+    try:
+        return int(float(x))
+    except (TypeError, ValueError):
+        return 0
+
+
 def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[str, Any]]:
     """
     Top gainers among S&P 500 stocks by % change from previous close. Uses yfinance.
@@ -127,7 +137,7 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                     close_curr = df["Close"].iloc[-1]
                     open_curr = df["Open"].iloc[-1]
                     vol_ser = df["Volume"] if "Volume" in df.columns else None
-                    vol = int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
+                    vol = _safe_vol_int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
                     # 20-day average volume (use last 20 rows, or all if fewer)
                     vol_avg = None
                     if vol_ser is not None and len(vol_ser) >= 1:
@@ -175,7 +185,7 @@ def get_top_gainers_sp500(limit: int = 50, timeframe: str = "1d") -> List[Dict[s
                         close_prev = close_ser.iloc[-2]
                         close_curr = close_ser.iloc[-1]
                         open_curr = open_ser.iloc[-1] if open_ser is not None and len(open_ser) else None
-                        vol = int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
+                        vol = _safe_vol_int(vol_ser.iloc[-1]) if vol_ser is not None and len(vol_ser) else 0
                         vol_avg = None
                         if vol_ser is not None and len(vol_ser) >= 1:
                             last_20 = vol_ser.iloc[-20:] if len(vol_ser) >= 20 else vol_ser
